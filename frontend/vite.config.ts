@@ -17,12 +17,15 @@ export default defineConfig(({ mode }) => {
     },
     server: {
       port: 9000,
-      host: '0.0.0.0', // 允许外部访问
+      host: '::', // 允许外部访问（IPv4 + IPv6 双栈）
       allowedHosts: [
         'localhost',
         '127.0.0.1',
         'xy.zhinianboke.com',
-        'xy-back.zhinianboke.com'
+        'xy-back.zhinianboke.com',
+        'xky-thurley',
+        '2409:8a20:72b6:37f0:2e0:5bff:fe68:1e7',
+        '[2409:8a20:72b6:37f0:2e0:5bff:fe68:1e7]'
       ],
       proxy: {
         '/api/v1/public/': publicStatusProxy(backendTarget),
