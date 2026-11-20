@@ -305,6 +305,30 @@ async def edit_personal_item(
         text_dto = payload.setdefault("itemTextDTO", {})
         if isinstance(text_dto, dict):
             text_dto["desc"] = str(description)
+            lines = str(description).replace("\r\n", "\n").replace("\r", "\n").split("\n")
+            text_dto["richTextDesc"] = json.dumps(
+                {
+                    "type": None,
+                    "children": [
+                        {
+                            "type": "Element",
+                            "children": [
+                                {
+                                    "type": "Text",
+                                    "text": line,
+                                    "properties": {},
+                                }
+                            ],
+                            "properties": {},
+                        }
+                        for line in lines
+                    ],
+                    "properties": {},
+                    "version": "1.0",
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
 
     if price is not None:
         try:
