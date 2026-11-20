@@ -88,6 +88,45 @@ class XianyuItemDetailClient:
                 "error": "",
             }
 
+        # 若公开详情接口触发验证拦截 (FAIL_SYS_USER_VALIDATE / RGV587) 或失败，
+        # 针对卖家自身商品降级调用个人版编辑快照接口 (mtop.idle.pc.idleitem.editDetail)
+        # 以拉取完整商品文案和全部图片
+        try:
+            edit_res = await mtop_call(
+                self.cookie_id,
+                self.cookies_str,
+                "mtop.idle.pc.idleitem.editDetail",
+                "1.0",
+                {"itemId": str(item_id)},
+                owner_id=self.owner_id,
+                origin="https://www.goofish.com",
+                referer="https://www.goofish.com/publish",
+                extra_params={"spm_cnt": "a21ybx.publish.0.0"},
+            )
+            self.cookies_str = edit_res.get("cookies_str", self.cookies_str)
+            if edit_res.get("success"):
+                data = (edit_res.get("res") or {}).get("data") or {}
+                text_dto = data.get("itemTextDTO") or {}
+                desc = str(text_dto.get("desc") or "")
+                image_infos = data.get("imageInfoDOList") or []
+                return {
+                    "success": True,
+                    "account_invalid": False,
+                    "item_invalid": False,
+                    "seller_user_id": str(data.get("userId") or ""),
+                    "seller_nick": None,
+                    "browse_count": 0,
+                    "want_count": 0,
+                    "collect_count": 0,
+                    "desc": desc,
+                    "image_infos": image_infos,
+                    "detail": data,
+                    "error": "",
+                    "fallback_source": "editDetail",
+                }
+        except Exception:
+            pass
+
         account_invalid = bool(result.get("account_invalid"))
         # 拿到了服务端业务失败响应且非账号问题 -> 商品级明确失败（下架/不存在/跨境等），停止重试；
         # 网络异常/重试耗尽（res 为 None）视为临时失败，可下次重试
