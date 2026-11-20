@@ -720,6 +720,28 @@ async def batch_save_item_ai_prompt(
 
 # ==================== 商品详情（通用路由放在具体路由之后）====================
 
+@items_router.post("/{cookie_id}/{item_id}/refresh-detail", response_model=ApiResponse)
+async def refresh_item_detail(
+    cookie_id: str,
+    item_id: str,
+    current_user: User = Depends(deps.get_current_active_user),
+    account_service: AccountService = Depends(deps.get_account_service),
+    item_service: ItemService = Depends(deps.get_item_service),
+) -> ApiResponse:
+    """从闲鱼平台刷新商品详情（浏览/想要/收藏数、文案、图片）。"""
+    owner_id, _ = resolve_owner_scope(current_user)
+    account = await account_service.get_account_for_user(owner_id, cookie_id)
+    if not account:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="账号不存在")
+
+    result = await item_service.refresh_item_detail(account, item_id)
+    return ApiResponse(
+        success=bool(result.get("success")),
+        message=result.get("message", ""),
+        data=result.get("data"),
+    )
+
+
 @items_router.get("/{cookie_id}/{item_id}")
 async def get_item_detail(
     cookie_id: str,

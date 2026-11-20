@@ -1177,6 +1177,70 @@ class ItemService:
                 )
         return {"deleted": deleted, "failed": failed}
 
+    async def refresh_item_detail(self, account: XYAccount, item_id: str) -> dict:
+        """从闲鱼平台刷新商品详情（浏览/想要/收藏数、文案、图片）并持久化到数据库。"""
+        from common.services.xianyu_detail_client import XianyuItemDetailClient
+        from sqlalchemy.orm.attributes import flag_modified
+
+        client = XianyuItemDetailClient(
+            cookie_id=account.account_id,
+            cookies_str=account.cookie,
+            owner_id=account.owner_id,
+        )
+        res = await client.get_detail(item_id)
+        if client.cookies_str and client.cookies_str != account.cookie:
+            account.cookie = client.cookies_str
+
+        if not res.get("success"):
+            return {
+                "success": False,
+                "message": res.get("error") or "获取商品详情失败",
+            }
+
+        stmt = select(XYCatalogItem).where(
+            XYCatalogItem.owner_id == account.owner_id,
+            XYCatalogItem.account_pk == account.id,
+            XYCatalogItem.item_id == item_id,
+        )
+        item = (await self.session.execute(stmt)).scalars().first()
+        if not item:
+            return {"success": False, "message": "本地未找到该商品记录"}
+
+        browse_count = res.get("browse_count", 0)
+        want_count = res.get("want_count", 0)
+        collect_count = res.get("collect_count", 0)
+        desc = res.get("desc", "")
+        image_infos = res.get("image_infos") or []
+        image_urls = [
+            img.get("url") for img in image_infos if isinstance(img, dict) and img.get("url")
+        ]
+
+        item.browse_count = browse_count
+        item.want_count = want_count
+        item.collect_count = collect_count
+        if desc:
+            item.full_desc = desc
+
+        meta = item.metadata_json or {}
+        if image_urls:
+            meta["image_urls"] = image_urls
+        if image_infos:
+            meta["image_infos"] = image_infos
+        if desc:
+            meta["full_desc"] = desc
+        item.metadata_json = meta
+        flag_modified(item, "metadata_json")
+
+        await self.session.commit()
+        logger.info(
+            f"【{account.account_id}】商品[{item_id}]详情刷新成功: 浏览={browse_count}, 想要={want_count}, 收藏={collect_count}"
+        )
+        return {
+            "success": True,
+            "message": "商品详情刷新成功",
+            "data": self._serialize_item(item, account.account_id),
+        }
+
     def _serialize_item(self, item: XYCatalogItem, account_id: str, default_reply_info: dict | None = None, has_card: bool = False) -> dict:
         metadata = item.metadata_json or {}
         # 从 detail(整块商品JSON) 解析鱼小铺特有字段供界面展示；普通账号无此字段时返回空
@@ -1208,6 +1272,12 @@ class ItemService:
             "item_sku_count": len(detail_obj.get("idle_item_sku_list") or []),
             # 是否鱼小铺商品：仅鱼小铺商品可改价
             "is_seller_item": detail_obj.get("source") == "seller",
+            "browse_count": item.browse_count or 0,
+            "want_count": item.want_count or 0,
+            "collect_count": item.collect_count or 0,
+            "full_desc": item.full_desc or metadata.get("full_desc") or metadata.get("description") or "",
+            "images": metadata.get("image_urls") or metadata.get("images") or [],
+            "image_infos": metadata.get("image_infos") or [],
             "ai_prompt": item.ai_prompt or "",
             "has_ai_prompt": bool(item.ai_prompt),
             "is_polished": item.is_polished or False,

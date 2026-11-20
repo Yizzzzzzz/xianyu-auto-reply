@@ -56,14 +56,33 @@ class XianyuItemDetailClient:
         if result.get("success"):
             detail = (result.get("res") or {}).get("data", {}) or {}
             seller = detail.get("sellerDO") or {}
+            item_do = detail.get("itemDO") or {}
             seller_user_id = seller.get("sellerId")
             seller_nick = seller.get("nick")
+
+            def _to_int(v: Any) -> int:
+                try:
+                    return int(v)
+                except (TypeError, ValueError):
+                    return 0
+
+            browse_cnt = _to_int(item_do.get("browseCnt"))
+            want_cnt = _to_int(item_do.get("wantCnt"))
+            collect_cnt = _to_int(item_do.get("collectCnt") or item_do.get("favorCnt"))
+            desc = str(item_do.get("desc") or "")
+            image_infos = item_do.get("imageInfos") or []
+
             return {
                 "success": True,
                 "account_invalid": False,
                 "item_invalid": False,
                 "seller_user_id": str(seller_user_id) if seller_user_id is not None else None,
                 "seller_nick": str(seller_nick) if seller_nick is not None else None,
+                "browse_count": browse_cnt,
+                "want_count": want_cnt,
+                "collect_count": collect_cnt,
+                "desc": desc,
+                "image_infos": image_infos,
                 "detail": detail,
                 "error": "",
             }
