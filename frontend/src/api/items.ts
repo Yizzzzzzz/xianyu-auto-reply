@@ -253,6 +253,30 @@ export const getSellerItemEditDetail = (
   return get(`${ITEM_PREFIX}/${cookieId}/${itemId}/seller-detail`)
 }
 
+// 个人号商品编辑（标题、价格、描述，同步到闲鱼平台）
+export interface PersonalItemEditPayload {
+  title?: string
+  price?: number
+  original_price?: number
+  description?: string
+}
+
+export const updatePersonalItem = (
+  cookieId: string,
+  itemId: string,
+  payload: PersonalItemEditPayload,
+): Promise<ApiResponse> => {
+  return put(`${ITEM_PREFIX}/${cookieId}/${itemId}/personal-edit`, payload)
+}
+
+// 刷新闲鱼商品详情（浏览/想要/收藏数、文案、图片）
+export const refreshItemDetail = (
+  cookieId: string,
+  itemId: string,
+): Promise<ApiResponse<Item>> => {
+  return post(`${ITEM_PREFIX}/${cookieId}/${itemId}/refresh-detail`)
+}
+
 // 提交鱼小铺商品编辑到闲鱼平台，成功后后端会重新同步该账号商品
 export const updateSellerItem = (
   cookieId: string,
