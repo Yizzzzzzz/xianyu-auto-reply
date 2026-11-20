@@ -854,6 +854,57 @@ async def get_seller_item_edit_detail(
     )
 
 
+class PersonalItemEditRequest(PydanticBaseModel):
+    title: str | None = None
+    price: float | None = None
+    description: str | None = None
+    original_price: float | None = None
+
+
+@items_router.put("/{cookie_id}/{item_id}/personal-edit", response_model=ApiResponse)
+async def update_personal_item(
+    cookie_id: str,
+    item_id: str,
+    payload: PersonalItemEditRequest,
+    current_user: User = Depends(deps.get_current_active_user),
+    account_service: AccountService = Depends(deps.get_account_service),
+    item_service: ItemService = Depends(deps.get_item_service),
+) -> ApiResponse:
+    """个人号商品编辑（标题、价格、描述）。直接同步到闲鱼平台并刷新本地商品。"""
+    owner_id, _ = resolve_owner_scope(current_user)
+    account = await account_service.get_account_for_user(owner_id, cookie_id)
+    if not account:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="账号不存在")
+
+    from app.services.xianyu_item_edit_service import edit_personal_item
+
+    result = await edit_personal_item(
+        account_id=account.account_id,
+        cookie=account.cookie,
+        item_id=item_id,
+        title=payload.title,
+        price=payload.price,
+        original_price=payload.original_price,
+        description=payload.description,
+        owner_id=account.owner_id,
+    )
+    if not result.get("success"):
+        return ApiResponse(success=False, message=result.get("message", "编辑失败"))
+
+    if result.get("cookies_str"):
+        account.cookie = result["cookies_str"]
+
+    # 重新同步该账号商品以更新本地目录
+    message = result.get("message") or "商品编辑成功"
+    try:
+        sync_result = await item_service.fetch_all_items_from_account(account=account)
+        if sync_result.get("success"):
+            message = f"{message}，已重新同步商品"
+    except Exception as exc:
+        logger.error(f"编辑成功后同步失败: {exc}")
+    return ApiResponse(success=True, message=message)
+
+
 @items_router.put("/{cookie_id}/{item_id}/seller-edit", response_model=ApiResponse)
 async def update_seller_item(
     cookie_id: str,

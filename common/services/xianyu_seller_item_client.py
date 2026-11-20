@@ -275,6 +275,37 @@ async def update_seller_item_price(
     if bool(single) == bool(sku_list):
         return {"success": False, "message": "改价参数错误：单规格与多规格需二选一"}
 
+    # 账号类型判断：鱼小铺走原有卖家后台改价接口，个人号重定向到个人编辑链路
+    from common.services.xianyu_publish_service import detect_publish_account_capability
+
+    capability = await detect_publish_account_capability(
+        cookie, account_id=account_id, owner_id=owner_id
+    )
+    if not capability.get("is_fish_shop"):
+        if sku_list:
+            return {"success": False, "message": "个人号不支持多规格改价，请使用单规格改价"}
+        if not single:
+            return {"success": False, "message": "缺少改价参数"}
+        from common.services.backend_web_loader import _load_backend_web_module
+
+        edit_module = _load_backend_web_module(
+            "app.services.xianyu_item_edit_service",
+            "backend-web/app/services/xianyu_item_edit_service.py",
+        )
+        edit_personal_item = getattr(edit_module, "edit_personal_item")
+        result = await edit_personal_item(
+            account_id=account_id,
+            cookie=cookie,
+            item_id=item_id,
+            price=float(single["price"]),
+            owner_id=owner_id,
+        )
+        return {
+            "success": bool(result.get("success")),
+            "message": result.get("message")
+            or ("改价成功" if result.get("success") else "改价失败"),
+        }
+
     data: Dict[str, Any] = {"itemId": str(item_id)}
     if single:
         # 单规格：顶层携带 price(元) 与 quantity

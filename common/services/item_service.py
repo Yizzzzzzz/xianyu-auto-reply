@@ -1,4 +1,4 @@
-﻿"""
+"""
 商品服务
 
 功能：
@@ -791,9 +791,10 @@ class ItemService:
         """
         from common.services.xianyu_seller_item_client import update_seller_item_price
 
-        # 改价功能仅支持鱼小铺账号
-        if not await self._detect_is_fish_shop(account):
-            return {"success": False, "message": "改价功能仅支持鱼小铺账号"}
+        # 改价功能：鱼小铺支持单/多规格，个人号支持单规格快速改价
+        is_fish_shop = await self._detect_is_fish_shop(account)
+        if not is_fish_shop and skus:
+            return {"success": False, "message": "个人号不支持多规格改价，请使用单规格改价"}
 
         try:
             single_payload = None
