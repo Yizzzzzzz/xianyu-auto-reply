@@ -1751,10 +1751,10 @@ export function Items() {
                       <div className="flex gap-1">
                         <button
                           onClick={() => {
-                            if (!item.is_seller_item) return handleEdit(item)
                             if (!item.cookie_id) {
                               return addToast({ type: 'warning', message: '该商品缺少所属账号，无法同步编辑到闲鱼，请先重新同步商品' })
                             }
+                            if (!item.is_seller_item) return handleEdit(item)
                             setSellerEditingItem(item)
                           }}
                           className="table-action-btn hover:!bg-blue-50"

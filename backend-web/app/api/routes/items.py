@@ -898,6 +898,9 @@ async def update_personal_item(
     if not account:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="账号不存在")
 
+    if payload.title is None and payload.price is None and payload.description is None:
+        return ApiResponse(success=False, message="未做任何修改")
+
     from app.services.xianyu_item_edit_service import edit_personal_item
 
     result = await edit_personal_item(
