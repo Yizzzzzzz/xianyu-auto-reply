@@ -1,20 +1,21 @@
 """
-闲鱼卖家后台（鱼小铺）商品编辑服务。
+闲鱼商品编辑服务（支持鱼小铺卖家后台与个人版）。
 
 功能：
-1. 调用 mtop.idle.pc.backend.idleitem.editdetail 拉取平台商品详情，转成编辑表单数据；
-2. 调用 mtop.idle.pc.backend.idleitem.edit 提交编辑，载荷与单品发布完全共用一套构造器；
-3. 提交前重新拉取平台详情作为快照，未改动的图片/视频/地址/运费直接复用，避免全量覆盖丢字段。
-
-说明：
-- 两个接口的请求头、spm 参数与单品发布接口一致（抓包确认）；
-- edit 为全量覆盖式提交，不是增量更新，因此必须带上完整载荷；
-- 价格单位为分（priceInCent），与已有改价接口（元）不同，切勿混用；
-- 仅鱼小铺账号可用，非鱼小铺账号返回业务失败而不抛异常。
+1. 鱼小铺账号：
+   - 调用 mtop.idle.pc.backend.idleitem.editdetail 拉取平台详情转成编辑表单；
+   - 调用 mtop.idle.pc.backend.idleitem.edit 提交编辑（inputJson 字符串）。
+2. 个人版账号：
+   - 快照拉取：调用 mtop.idle.pc.idleitem.editDetail (v1.0) 拉取完整快照；
+   - 提交更新：调用 mtop.idle.pc.idleitem.edit (v1.0)，顶级字典提交；
+   - 覆盖策略：提交前重新拉取快照，仅覆盖修改字段（title/price等），其余图片、发货、运费原样回填；
+   - 安全措施：每次编辑保证间隔 10~15 秒（防滑块风控），平台原始错误透传至调用方。
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -27,11 +28,11 @@ from app.services.xianyu_item_payload_builder import build_item_payload
 from common.services.xianyu_mtop import mtop_call
 from common.services.xianyu_publish_service import detect_publish_account_capability
 
+# 鱼小铺（卖家后台）接口定义
 EDIT_DETAIL_API = "mtop.idle.pc.backend.idleitem.editdetail"
 EDIT_API = "mtop.idle.pc.backend.idleitem.edit"
 SELLER_ORIGIN = "https://seller.goofish.com"
 SELLER_REFERER = "https://seller.goofish.com/?site=COMMONPRO"
-# 抓包确认：编辑接口与发布接口使用同一套 spm 与站点标识
 SELLER_EXTRA_PARAMS = {
     "idle_site_biz_code": "COMMONPRO",
     "spm_cnt": "a21107h.42826273.0.0",
@@ -40,12 +41,41 @@ SELLER_EXTRA_HEADERS = {
     "idle_site_biz_code": "COMMONPRO",
     "idle_user_group_member_id": "",
 }
-# 业务失败码白名单：平台成功时可能返回这些值，其余非空取值一律视为失败
+
+# 个人版商品编辑接口定义（验证通过链路）
+PERSONAL_EDIT_DETAIL_API = "mtop.idle.pc.idleitem.editDetail"
+PERSONAL_EDIT_API = "mtop.idle.pc.idleitem.edit"
+PERSONAL_ORIGIN = "https://www.goofish.com"
+PERSONAL_REFERER = "https://www.goofish.com/publish"
+PERSONAL_EXTRA_PARAMS = {
+    "spm_cnt": "a21ybx.publish.0.0",
+}
+
+# 业务失败码白名单
 _SUCCESS_CODES = {"", "0", "200", "success", "SUCCESS"}
+
+# 防滑块风控：记录每个账号最近一次编辑时间，限制最小间隔为 12 秒
+_ACCOUNT_LAST_EDIT: dict[str, float] = {}
+_EDIT_THROTTLE_LOCK = asyncio.Lock()
+MIN_EDIT_INTERVAL = 12.0
+
+
+async def _throttle_edit(account_id: str) -> None:
+    """防风控节流：同一账号编辑操作至少间隔 10~15 秒。"""
+    async with _EDIT_THROTTLE_LOCK:
+        last_time = _ACCOUNT_LAST_EDIT.get(account_id, 0.0)
+        elapsed = time.time() - last_time
+        if elapsed < MIN_EDIT_INTERVAL:
+            wait = MIN_EDIT_INTERVAL - elapsed
+            logger.info(
+                f"【{account_id}】防风控保护：距离上次编辑仅 {elapsed:.1f}s，等待 {wait:.1f}s 后提交"
+            )
+            await asyncio.sleep(wait)
+        _ACCOUNT_LAST_EDIT[account_id] = time.time()
 
 
 def _fail(message: str, *, account_invalid: bool, cookie: str) -> dict[str, Any]:
-    """构造统一的失败返回，避免各分支重复拼字典。"""
+    """构造统一的失败返回。"""
     return {
         "success": False,
         "message": message,
@@ -58,17 +88,7 @@ def _fail(message: str, *, account_invalid: bool, cookie: str) -> dict[str, Any]
 async def _call_seller_api(
     *, account_id: str, cookie: str, owner_id: int | None, api: str, data: dict[str, Any]
 ) -> dict[str, Any]:
-    """按卖家后台的请求头与 spm 参数调用编辑相关 mtop 接口。
-
-    Args:
-        account_id: 闲鱼账号标识。
-        cookie: 账号 Cookie。
-        owner_id: 账号所属用户ID，令牌刷新回写使用。
-        api: mtop 接口名。
-        data: 接口业务参数。
-    Returns:
-        dict: mtop_call 的原始返回（success/account_invalid/res/error/cookies_str）。
-    """
+    """调用鱼小铺卖家后台接口。"""
     return await mtop_call(
         account_id=account_id,
         cookies_str=cookie,
@@ -84,72 +104,32 @@ async def _call_seller_api(
 
 
 def _loggable_response(response: dict[str, Any]) -> str:
-    """把 mtop 返回裁剪成可写日志的内容（剔除 Cookie 等凭据）。
-
-    Args:
-        response: mtop_call 的原始返回。
-    Returns:
-        str: 仅含业务字段（success/account_invalid/res/error）的 JSON 字符串。
-    """
+    """把 mtop 返回裁剪成可写日志的内容（剔除 Cookie 等凭据）。"""
     safe = {key: response.get(key) for key in ("success", "account_invalid", "res", "error")}
     return json.dumps(safe, ensure_ascii=False, default=str)
 
 
-async def _ensure_fish_shop(
+async def _check_account_capability(
     *, account_id: str, cookie: str, owner_id: int | None
-) -> tuple[str, dict[str, Any] | None]:
-    """校验账号已开通鱼小铺。
-
-    Args:
-        account_id: 闲鱼账号标识。
-        cookie: 账号 Cookie。
-        owner_id: 账号所属用户ID。
-    Returns:
-        tuple: (可能刷新后的 Cookie, 失败返回)，校验通过时失败返回为 None。
-    """
-    # 编辑不调用 ensure_publish_capability_reliable：判定不可信时最坏结果只是拒绝编辑，
-    # 不会像发布那样把鱼小铺商品按个人版落地，因此保留回落个人版判定的结果。
+) -> tuple[str, bool, dict[str, Any] | None]:
+    """检测账号能力，返回 (cookie, is_fish_shop, failure_or_none)。"""
     capability = await detect_publish_account_capability(
         cookie, account_id=account_id, owner_id=owner_id
     )
     cookie = capability.get("cookies_str") or cookie
     if not capability.get("success"):
-        return cookie, _fail(
+        return cookie, False, _fail(
             capability.get("message") or "账号发布能力检测失败，请稍后重试",
             account_invalid=bool(capability.get("account_invalid")),
             cookie=cookie,
         )
-    if not capability.get("is_fish_shop"):
-        # 检测不可信时不能断言「未开通鱼小铺」：真实原因可能是闲鱼限流/风控/网络异常，
-        # 若照抄这句话，用户会误以为是账号权限问题而不会重试
-        if not capability.get("detection_reliable", True):
-            reason = str(
-                capability.get("detection_unreliable_reason") or "鱼小铺后台发布配置暂时取不到"
-            )
-            return cookie, _fail(
-                f"暂时无法确认账号是否开通鱼小铺（{reason}），请稍后重试",
-                account_invalid=False,
-                cookie=cookie,
-            )
-        return cookie, _fail(
-            "该账号未开通鱼小铺，无法编辑平台商品", account_invalid=False, cookie=cookie
-        )
-    return cookie, None
+    return cookie, bool(capability.get("is_fish_shop")), None
 
 
 async def _fetch_edit_detail(
     *, account_id: str, cookie: str, item_id: str, owner_id: int | None
 ) -> tuple[str, dict[str, Any] | None, dict[str, Any] | None]:
-    """拉取平台商品编辑详情。
-
-    Args:
-        account_id: 闲鱼账号标识。
-        cookie: 账号 Cookie。
-        item_id: 闲鱼商品ID。
-        owner_id: 账号所属用户ID。
-    Returns:
-        tuple: (可能刷新后的 Cookie, 商品详情, 失败返回)，成功时失败返回为 None。
-    """
+    """拉取鱼小铺卖家后台商品详情。"""
     response = await _call_seller_api(
         account_id=account_id,
         cookie=cookie,
@@ -160,7 +140,7 @@ async def _fetch_edit_detail(
     cookie = response.get("cookies_str") or cookie
     if not response.get("success"):
         logger.error(
-            f"闲鱼商品编辑详情接口失败完整返回: account_id={account_id}, item_id={item_id}, "
+            f"闲鱼鱼小铺编辑详情失败完整返回: account_id={account_id}, item_id={item_id}, "
             f"response={_loggable_response(response)}"
         )
         return (
@@ -175,25 +155,54 @@ async def _fetch_edit_detail(
     res = response.get("res") if isinstance(response.get("res"), dict) else {}
     detail = res.get("data") if isinstance(res.get("data"), dict) else None
     if not detail or not _text(detail.get("itemId")):
-        logger.error(
-            f"闲鱼商品编辑详情返回结构异常: account_id={account_id}, item_id={item_id}, "
-            f"res={json.dumps(res, ensure_ascii=False, default=str)}"
-        )
         return cookie, None, _fail("闲鱼未返回商品详情，无法编辑", account_invalid=False, cookie=cookie)
     return cookie, detail, None
 
 
+async def _fetch_personal_edit_detail(
+    *, account_id: str, cookie: str, item_id: str, owner_id: int | None
+) -> tuple[str, dict[str, Any] | None, dict[str, Any] | None]:
+    """拉取个人版商品详情快照 (mtop.idle.pc.idleitem.editDetail)。"""
+    response = await mtop_call(
+        account_id=account_id,
+        cookies_str=cookie,
+        api=PERSONAL_EDIT_DETAIL_API,
+        version="1.0",
+        data={"itemId": str(item_id)},
+        owner_id=owner_id,
+        origin=PERSONAL_ORIGIN,
+        referer=PERSONAL_REFERER,
+        extra_params=PERSONAL_EXTRA_PARAMS,
+    )
+    cookie = response.get("cookies_str") or cookie
+    if not response.get("success"):
+        logger.error(
+            f"闲鱼个人版编辑详情获取失败: account_id={account_id}, item_id={item_id}, "
+            f"response={_loggable_response(response)}"
+        )
+        return (
+            cookie,
+            None,
+            _fail(
+                f"获取闲鱼商品详情快照失败：{response.get('error') or '未知错误'}",
+                account_invalid=bool(response.get("account_invalid")),
+                cookie=cookie,
+            ),
+        )
+    res = response.get("res") if isinstance(response.get("res"), dict) else {}
+    ret = res.get("ret") or []
+    ret_str = ret[0] if ret else ""
+    if ret_str and "SUCCESS" not in ret_str:
+        return cookie, None, _fail(f"获取商品详情快照失败：{ret_str}", account_invalid=False, cookie=cookie)
+
+    data = res.get("data")
+    if not isinstance(data, dict):
+        return cookie, None, _fail("闲鱼返回的商品快照为空，无法编辑", account_invalid=False, cookie=cookie)
+    return cookie, data, None
+
+
 def _business_failure_message(res: dict[str, Any]) -> str:
-    """从 edit 接口返回里识别「ret 成功但业务失败」的情况。
-
-    抓包中 edit 的响应体为空，成功结构未知，因此按通用标志位判断：
-    data 里显式的 success=false 或非白名单 code 一律视为失败。
-
-    Args:
-        res: mtop 返回的完整响应 JSON。
-    Returns:
-        str: 失败提示，判定为成功时返回空串。
-    """
+    """从 edit 接口返回识别业务失败提示。"""
     data = res.get("data") if isinstance(res.get("data"), dict) else {}
     if not data:
         return ""
@@ -214,29 +223,26 @@ def _business_failure_message(res: dict[str, Any]) -> str:
 async def fetch_seller_item_edit_detail(
     *, account_id: str, cookie: str, item_id: str, owner_id: int | None = None
 ) -> dict[str, Any]:
-    """拉取鱼小铺商品详情并转成编辑表单数据。
-
-    Args:
-        account_id: 闲鱼账号标识（cookie_id）。
-        cookie: 账号 Cookie。
-        item_id: 闲鱼商品ID。
-        owner_id: 账号所属用户ID。
-    Returns:
-        dict: {success, message, account_invalid, cookies_str, data:{form}}
-    """
+    """拉取商品详情并转成编辑表单数据（根据账号类型自动分流）。"""
     item_id = _text(item_id)
     if not item_id:
         return _fail("缺少闲鱼商品ID，无法编辑", account_invalid=False, cookie=cookie)
 
-    cookie, failure = await _ensure_fish_shop(
+    cookie, is_fish_shop, failure = await _check_account_capability(
         account_id=account_id, cookie=cookie, owner_id=owner_id
     )
     if failure:
         return failure
 
-    cookie, detail, failure = await _fetch_edit_detail(
-        account_id=account_id, cookie=cookie, item_id=item_id, owner_id=owner_id
-    )
+    if is_fish_shop:
+        cookie, detail, failure = await _fetch_edit_detail(
+            account_id=account_id, cookie=cookie, item_id=item_id, owner_id=owner_id
+        )
+    else:
+        cookie, detail, failure = await _fetch_personal_edit_detail(
+            account_id=account_id, cookie=cookie, item_id=item_id, owner_id=owner_id
+        )
+
     if failure:
         return failure
 
@@ -250,6 +256,132 @@ async def fetch_seller_item_edit_detail(
     }
 
 
+async def edit_personal_item(
+    *,
+    account_id: str,
+    cookie: str,
+    item_id: str,
+    title: str | None = None,
+    price: float | None = None,
+    original_price: float | None = None,
+    description: str | None = None,
+    owner_id: int | None = None,
+) -> dict[str, Any]:
+    """提交个人号商品编辑。
+
+    链路：
+    1. 提交前防滑块节流（至少间隔 10~15 秒）；
+    2. 拉取 mtop.idle.pc.idleitem.editDetail 获得完整快照；
+    3. 仅覆盖修改的字段（title、priceInCent、desc等），其他快照字段原样保留；
+    4. 提交到 mtop.idle.pc.idleitem.edit (v1.0)，顶级字典提交。
+    """
+    item_id = _text(item_id)
+    if not item_id:
+        return _fail("缺少闲鱼商品ID，无法编辑", account_invalid=False, cookie=cookie)
+
+    # 1. 防风控节流
+    await _throttle_edit(account_id)
+
+    # 2. 重新拉取平台详情快照
+    cookie, snapshot, failure = await _fetch_personal_edit_detail(
+        account_id=account_id, cookie=cookie, item_id=item_id, owner_id=owner_id
+    )
+    if failure:
+        return failure
+
+    payload = dict(snapshot or {})
+
+    # 3. 逐项回填覆盖修改字段
+    if title is not None:
+        new_title = _text(title)
+        if not new_title:
+            return _fail("商品标题不能为空", account_invalid=False, cookie=cookie)
+        text_dto = payload.setdefault("itemTextDTO", {})
+        if isinstance(text_dto, dict):
+            text_dto["title"] = new_title
+            text_dto["titleDescSeparate"] = "true"
+
+    if description is not None:
+        text_dto = payload.setdefault("itemTextDTO", {})
+        if isinstance(text_dto, dict):
+            text_dto["desc"] = str(description)
+
+    if price is not None:
+        try:
+            cents = str(round(float(price) * 100))
+            if int(cents) <= 0:
+                return _fail("售价必须大于0", account_invalid=False, cookie=cookie)
+        except (TypeError, ValueError):
+            return _fail("售价格式不正确", account_invalid=False, cookie=cookie)
+        price_dto = payload.setdefault("itemPriceDTO", {})
+        if isinstance(price_dto, dict):
+            price_dto["priceInCent"] = cents
+
+    if original_price is not None:
+        try:
+            orig_cents = str(round(float(original_price) * 100))
+            price_dto = payload.setdefault("itemPriceDTO", {})
+            if isinstance(price_dto, dict):
+                price_dto["origPriceInCent"] = orig_cents
+        except (TypeError, ValueError):
+            pass
+
+    payload["itemId"] = item_id
+
+    # 4. 提交编辑接口
+    logger.info(
+        f"闲鱼个人号商品编辑提交请求: account_id={account_id}, item_id={item_id}, "
+        f"title={title}, price={price}"
+    )
+    response = await mtop_call(
+        account_id=account_id,
+        cookies_str=cookie,
+        api=PERSONAL_EDIT_API,
+        version="1.0",
+        data=payload,
+        owner_id=owner_id,
+        origin=PERSONAL_ORIGIN,
+        referer=PERSONAL_REFERER,
+        extra_params=PERSONAL_EXTRA_PARAMS,
+    )
+    cookie = response.get("cookies_str") or cookie
+    logger.info(
+        f"闲鱼个人号商品编辑接口完整返回: account_id={account_id}, item_id={item_id}, "
+        f"response={_loggable_response(response)}"
+    )
+
+    if not response.get("success"):
+        return _fail(
+            f"闲鱼接口编辑失败：{response.get('error') or '未知错误'}",
+            account_invalid=bool(response.get("account_invalid")),
+            cookie=cookie,
+        )
+
+    res = response.get("res") if isinstance(response.get("res"), dict) else {}
+    ret = res.get("ret") or []
+    ret_str = ret[0] if ret else ""
+    if ret_str and "SUCCESS" not in ret_str:
+        return _fail(f"闲鱼接口编辑失败：{ret_str}", account_invalid=False, cookie=cookie)
+
+    biz_data = res.get("data")
+    if isinstance(biz_data, dict):
+        code = str(biz_data.get("code") or biz_data.get("errorCode") or "")
+        if code and code not in _SUCCESS_CODES:
+            msg = biz_data.get("msg") or biz_data.get("errorMsg") or f"code={code}"
+            return _fail(f"闲鱼接口编辑失败：{msg}", account_invalid=False, cookie=cookie)
+        if biz_data.get("success") is False:
+            msg = biz_data.get("msg") or biz_data.get("errorMsg") or "业务处理失败"
+            return _fail(f"闲鱼接口编辑失败：{msg}", account_invalid=False, cookie=cookie)
+
+    return {
+        "success": True,
+        "message": "商品编辑成功",
+        "account_invalid": False,
+        "cookies_str": cookie,
+        "data": None,
+    }
+
+
 async def edit_seller_item(
     *,
     account_id: str,
@@ -259,29 +391,32 @@ async def edit_seller_item(
     owner_id: int | None = None,
     static_root: str | Path | None = None,
 ) -> dict[str, Any]:
-    """提交鱼小铺商品编辑，载荷与单品发布共用构造器。
-
-    Args:
-        account_id: 闲鱼账号标识（cookie_id）。
-        cookie: 账号 Cookie。
-        item_id: 闲鱼商品ID。
-        item_data: 编辑表单数据（字段与单品发布一致）。
-        owner_id: 账号所属用户ID。
-        static_root: 本地静态文件根目录，解析 /static/... 图片路径使用。
-    Returns:
-        dict: {success, message, account_invalid, cookies_str, data:None}
-    """
+    """提交商品编辑，按账号类型自动分流（鱼小铺走全量构造器，个人号走快照回填）。"""
     item_id = _text(item_id)
     if not item_id:
         return _fail("缺少闲鱼商品ID，无法编辑", account_invalid=False, cookie=cookie)
 
-    cookie, failure = await _ensure_fish_shop(
+    cookie, is_fish_shop, failure = await _check_account_capability(
         account_id=account_id, cookie=cookie, owner_id=owner_id
     )
     if failure:
         return failure
 
-    # 提交前重新拉取平台详情作为快照，避免用过期数据覆盖平台最新状态
+    # 个人号分流
+    if not is_fish_shop:
+        return await edit_personal_item(
+            account_id=account_id,
+            cookie=cookie,
+            item_id=item_id,
+            title=item_data.get("title"),
+            price=item_data.get("price"),
+            original_price=item_data.get("original_price"),
+            description=item_data.get("description"),
+            owner_id=owner_id,
+        )
+
+    # 鱼小铺账号流程
+    await _throttle_edit(account_id)
     cookie, snapshot, failure = await _fetch_edit_detail(
         account_id=account_id, cookie=cookie, item_id=item_id, owner_id=owner_id
     )
@@ -300,12 +435,11 @@ async def edit_seller_item(
     except DirectPublishError as exc:
         return _fail(str(exc), account_invalid=exc.account_invalid, cookie=cookie)
 
-    # edit 与 publish 的载荷字段完全一致，只多一个 itemId（抓包确认）
     payload["itemId"] = item_id
-    # 抓包中 edit 的 itemCatDTO 不带 leafId，平台编辑详情也不返回该字段，为空时不提交
     cat_dto = payload.get("itemCatDTO")
     if isinstance(cat_dto, dict) and not _text(cat_dto.get("leafId")):
         cat_dto.pop("leafId", None)
+
     response = await _call_seller_api(
         account_id=account_id,
         cookie=cookie,
@@ -314,21 +448,24 @@ async def edit_seller_item(
         data={"inputJson": json.dumps(payload, ensure_ascii=False, separators=(",", ":"))},
     )
     cookie = response.get("cookies_str") or cookie
-    # 抓包中 edit 响应体为空，成功结构未知：无论成败都打印完整返回，便于据实收紧判定
+
     logger.info(
-        f"闲鱼商品编辑接口完整返回: account_id={account_id}, item_id={item_id}, "
+        f"闲鱼鱼小铺编辑接口完整返回: account_id={account_id}, item_id={item_id}, "
         f"response={_loggable_response(response)}"
     )
+
     if not response.get("success"):
         return _fail(
             f"闲鱼接口编辑失败：{response.get('error') or '未知错误'}",
             account_invalid=bool(response.get("account_invalid")),
             cookie=cookie,
         )
+
     res = response.get("res") if isinstance(response.get("res"), dict) else {}
     business_failure = _business_failure_message(res)
     if business_failure:
         return _fail(f"闲鱼接口编辑失败：{business_failure}", account_invalid=False, cookie=cookie)
+
     return {
         "success": True,
         "message": "商品编辑成功",
@@ -338,4 +475,4 @@ async def edit_seller_item(
     }
 
 
-__all__ = ["edit_seller_item", "fetch_seller_item_edit_detail"]
+__all__ = ["edit_seller_item", "fetch_seller_item_edit_detail", "edit_personal_item"]
