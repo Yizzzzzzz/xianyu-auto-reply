@@ -138,6 +138,12 @@ export interface Item {
   item_sku_list?: ItemSku[]         // 多规格明细（鱼小铺）
   item_sku_count?: number           // 规格数（鱼小铺）
   is_seller_item?: boolean          // 是否鱼小铺商品（仅鱼小铺可改价）
+  browse_count?: number             // 浏览量
+  want_count?: number               // 想要数
+  collect_count?: number            // 收藏数
+  full_desc?: string                // 详情文案
+  images?: string[]                 // 商品图片URL列表
+  image_infos?: Array<{ url: string; width?: number; height?: number; major?: boolean }>
   has_sku?: boolean
   is_polished?: boolean            // 是否擦亮
   is_multi_spec?: number | boolean

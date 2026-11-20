@@ -1,6 +1,6 @@
-﻿import { useEffect, useState, useRef } from 'react'
-import { CheckSquare, Download, Edit2, ExternalLink, Loader2, Package, PackageX, RefreshCw, Search, Square, Trash2, X, Settings, Plus, MessageSquare, Bot, ChevronLeft, ChevronRight, ImagePlus, Unlink, Tag } from 'lucide-react'
-import { batchDeleteItems, batchDeleteXianyuItems, batchOfflineItems, deleteItem, fetchAllItemsFromAccessibleAccounts, fetchAllItemsFromAccount, getItemsPaginated, updateItem, updateItemMultiQuantityDelivery, updateItemMultiSpec, updateItemPrice, getItemDefaultReply, saveItemDefaultReply, deleteItemDefaultReply, batchSaveItemDefaultReply, batchDeleteItemDefaultReply, getItemAiPrompt, saveItemAiPrompt, batchDeleteItemAiPrompt, batchSaveItemAiPrompt, uploadItemDefaultReplyImage, uploadBatchDefaultReplyImage, type ItemFilterParams } from '@/api/items'
+import { useEffect, useState, useRef } from 'react'
+import { CheckSquare, Download, Edit2, ExternalLink, Loader2, Package, PackageX, RefreshCw, Search, Square, Trash2, X, Settings, Plus, MessageSquare, Bot, ChevronLeft, ChevronRight, ImagePlus, Unlink, Tag, Eye } from 'lucide-react'
+import { batchDeleteItems, batchDeleteXianyuItems, batchOfflineItems, deleteItem, fetchAllItemsFromAccessibleAccounts, fetchAllItemsFromAccount, getItemsPaginated, updateItemMultiQuantityDelivery, updateItemMultiSpec, updateItemPrice, updatePersonalItem, refreshItemDetail, getItemDefaultReply, saveItemDefaultReply, deleteItemDefaultReply, batchSaveItemDefaultReply, batchDeleteItemDefaultReply, getItemAiPrompt, saveItemAiPrompt, batchDeleteItemAiPrompt, batchSaveItemAiPrompt, uploadItemDefaultReplyImage, uploadBatchDefaultReplyImage, type ItemFilterParams } from '@/api/items'
 import { getAccountDetails } from '@/api/accounts'
 import { getUserSetting } from '@/api/settings'
 import { batchClearItemRelations } from '@/api/cards'
@@ -55,9 +55,14 @@ export function Items() {
 
   // 编辑弹窗状态
   const [editingItem, setEditingItem] = useState<Item | null>(null)
+  const [editTitle, setEditTitle] = useState('')
   const [editDetail, setEditDetail] = useState('')
   const [editPrice, setEditPrice] = useState('')
   const [editSaving, setEditSaving] = useState(false)
+
+  // 商品详情与流量数据弹窗状态
+  const [detailModalItem, setDetailModalItem] = useState<Item | null>(null)
+  const [detailRefreshing, setDetailRefreshing] = useState(false)
 
   // 鱼小铺商品编辑弹窗状态（界面同单品发布，提交后同步到闲鱼平台）
   const [sellerEditingItem, setSellerEditingItem] = useState<Item | null>(null)
@@ -642,27 +647,73 @@ export function Items() {
     }
   }
 
+  // 打开详情弹窗并按需懒加载详情数据
+  const handleOpenDetailModal = (item: Item) => {
+    setDetailModalItem(item)
+    if (!item.full_desc && (!item.browse_count || item.browse_count === 0)) {
+      handleRefreshDetail(item)
+    }
+  }
+
+  // 刷新闲鱼详情（流量数据、图片、文案）
+  const handleRefreshDetail = async (item: Item) => {
+    if (!item.cookie_id || !item.item_id || detailRefreshing) return
+    setDetailRefreshing(true)
+    try {
+      const res = await refreshItemDetail(item.cookie_id, item.item_id)
+      if (res.success && res.data) {
+        const updatedItem = ((res.data as any).item || res.data) as Item
+        setDetailModalItem(updatedItem)
+        setItems((prev) =>
+          prev.map((it) => (it.item_id === item.item_id ? { ...it, ...updatedItem } : it))
+        )
+        addToast({ type: 'success', message: '商品详情刷新成功' })
+      } else {
+        addToast({ type: 'error', message: res.message || '刷新详情失败' })
+      }
+    } catch (err: any) {
+      addToast({ type: 'error', message: err?.message || '刷新详情异常' })
+    } finally {
+      setDetailRefreshing(false)
+    }
+  }
+
   // 打开编辑弹窗
   const handleEdit = (item: Item) => {
     setEditingItem(item)
-    setEditDetail(item.item_detail || item.desc || '')
-    setEditPrice(item.item_price || item.price || '')
+    setEditTitle(item.item_title || item.title || '')
+    const priceNum = String(item.item_price || item.price || '').replace(/[^\d.]/g, '')
+    setEditPrice(priceNum)
+    setEditDetail(item.full_desc || item.item_description || item.desc || '')
   }
 
-  // 保存编辑
+  // 保存编辑（个人号同步到闲鱼平台并同步本地）
   const handleSaveEdit = async () => {
     if (!editingItem) return
+    if (!editTitle.trim()) {
+      return addToast({ type: 'warning', message: '商品标题不能为空' })
+    }
+    const priceNum = Number(editPrice)
+    if (isNaN(priceNum) || priceNum <= 0) {
+      return addToast({ type: 'warning', message: '请输入大于0的有效价格' })
+    }
+
     setEditSaving(true)
     try {
-      await updateItem(editingItem.cookie_id, editingItem.item_id, {
-        item_detail: editDetail,
-        price: editPrice,
+      const res = await updatePersonalItem(editingItem.cookie_id, editingItem.item_id, {
+        title: editTitle.trim(),
+        price: priceNum,
+        description: editDetail.trim() || undefined,
       })
-      addToast({ type: 'success', message: '商品信息已更新' })
-      setEditingItem(null)
-      loadItems()
-    } catch {
-      addToast({ type: 'error', message: '更新失败' })
+      if (res.success) {
+        addToast({ type: 'success', message: res.message || '商品信息已同步到闲鱼' })
+        setEditingItem(null)
+        loadItems()
+      } else {
+        addToast({ type: 'error', message: res.message || '商品更新失败' })
+      }
+    } catch (err: any) {
+      addToast({ type: 'error', message: err?.message || '更新失败' })
     } finally {
       setEditSaving(false)
     }
@@ -1506,6 +1557,7 @@ export function Items() {
                   <th className="min-w-[160px]">商品ID</th>
                   <th className="min-w-[260px]">商品标题</th>
                   <th className="min-w-[80px]">价格</th>
+                  <th className="min-w-[120px] text-center">浏览/想要</th>
                   <th className="min-w-[80px] text-center">库存</th>
                   <th className="min-w-[100px] text-center">状态</th>
                   <th className="min-w-[170px]">上架时间</th>
@@ -1524,7 +1576,7 @@ export function Items() {
             <tbody>
               {filteredItems.length === 0 ? (
                 <tr>
-                  <td colSpan={18}>
+                  <td colSpan={19}>
                     <div className="empty-state py-8">
                       <Package className="empty-state-icon" />
                       <p className="text-gray-500">暂无商品数据</p>
@@ -1573,6 +1625,16 @@ export function Items() {
                     </td>
                     <td className="text-amber-600 font-medium">
                       {item.item_price || (item.price ? `¥${item.price}` : '-')}
+                    </td>
+                    <td className="text-center text-xs">
+                      <button
+                        onClick={() => handleOpenDetailModal(item)}
+                        className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-colors"
+                        title="点击查看/刷新详情与数据"
+                      >
+                        <span>👁️ {item.browse_count ?? 0}</span>
+                        <span>❤️ {item.want_count ?? 0}</span>
+                      </button>
                     </td>
                     <td className="text-center text-gray-600 dark:text-gray-300">
                       {item.item_quantity !== undefined && item.item_quantity !== null && `${item.item_quantity}` !== ''
@@ -1690,26 +1752,30 @@ export function Items() {
                         <button
                           onClick={() => {
                             if (!item.is_seller_item) return handleEdit(item)
-                            // 账号被删后残留的商品没有 cookie_id，无法定位闲鱼账号，直接提示而不是发起必然失败的请求
                             if (!item.cookie_id) {
                               return addToast({ type: 'warning', message: '该商品缺少所属账号，无法同步编辑到闲鱼，请先重新同步商品' })
                             }
                             setSellerEditingItem(item)
                           }}
                           className="table-action-btn hover:!bg-blue-50"
-                          title={item.is_seller_item ? '编辑（同步到闲鱼）' : '编辑'}
+                          title={item.is_seller_item ? '编辑（鱼小铺多规格）' : '编辑（同步到闲鱼）'}
                         >
                           <Edit2 className="w-4 h-4 text-blue-500" />
                         </button>
-                        {item.is_seller_item && (
-                          <button
-                            onClick={() => handleOpenPriceModal(item)}
-                            className="table-action-btn hover:!bg-amber-50"
-                            title="改价"
-                          >
-                            <Tag className="w-4 h-4 text-amber-500" />
-                          </button>
-                        )}
+                        <button
+                          onClick={() => handleOpenPriceModal(item)}
+                          className="table-action-btn hover:!bg-amber-50"
+                          title="改价（同步到闲鱼）"
+                        >
+                          <Tag className="w-4 h-4 text-amber-500" />
+                        </button>
+                        <button
+                          onClick={() => handleOpenDetailModal(item)}
+                          className="table-action-btn hover:!bg-emerald-50"
+                          title="查看详情与流量数据"
+                        >
+                          <Eye className="w-4 h-4 text-emerald-500" />
+                        </button>
                         <button
                           onClick={() => setDeleteItemConfirm({ open: true, item })}
                           className="table-action-btn hover:!bg-red-50"
@@ -1987,11 +2053,12 @@ export function Items() {
         </div>
       )}
 
-      {/* 编辑弹窗 */}
-      {editingItem && (        <div className="modal-overlay">
+      {/* 个人号编辑弹窗 */}
+      {editingItem && (
+        <div className="modal-overlay">
           <div className="modal-content max-w-lg">
             <div className="modal-header">
-              <h2 className="modal-title">编辑商品</h2>
+              <h2 className="modal-title">编辑商品（同步到闲鱼）</h2>
               <button onClick={() => setEditingItem(null)} className="modal-close">
                 <X className="w-4 h-4" />
               </button>
@@ -2007,31 +2074,32 @@ export function Items() {
                 />
               </div>
               <div className="input-group">
-                <label className="input-label">商品标题</label>
+                <label className="input-label">商品标题（同步闲鱼）</label>
                 <input
                   type="text"
-                  value={editingItem.item_title || editingItem.title || ''}
-                  disabled
-                  className="input-ios bg-slate-100 dark:bg-slate-700"
+                  value={editTitle}
+                  onChange={(e) => setEditTitle(e.target.value)}
+                  className="input-ios"
+                  placeholder="输入新商品标题..."
                 />
               </div>
               <div className="input-group">
-                <label className="input-label">商品价格(没有同步闲鱼功能)</label>
+                <label className="input-label">商品价格（同步闲鱼，元）</label>
                 <input
                   type="text"
                   value={editPrice}
                   onChange={(e) => setEditPrice(e.target.value)}
                   className="input-ios"
-                  placeholder="输入商品价格，如：99.00"
+                  placeholder="输入新商品价格，如：19.90"
                 />
               </div>
               <div className="input-group">
-                <label className="input-label">商品详情(没有同步闲鱼功能)</label>
+                <label className="input-label">商品详情/文案</label>
                 <textarea
                   value={editDetail}
                   onChange={(e) => setEditDetail(e.target.value)}
                   className="input-ios h-32 resize-none"
-                  placeholder="输入商品详情..."
+                  placeholder="输入商品详情文案..."
                 />
               </div>
             </div>
@@ -2052,11 +2120,126 @@ export function Items() {
                 {editSaving ? (
                   <span className="flex items-center gap-2">
                     <Loader2 className="w-4 h-4 animate-spin" />
-                    保存中...
+                    保存并同步闲鱼...
                   </span>
                 ) : (
-                  '保存'
+                  '保存并同步闲鱼'
                 )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 商品详情与数据弹窗（浏览/想要/收藏数、全部图片、完整文案） */}
+      {detailModalItem && (
+        <div className="modal-overlay">
+          <div className="modal-content max-w-2xl max-h-[90vh] overflow-y-auto">
+            <div className="modal-header">
+              <div className="flex items-center gap-3">
+                <h2 className="modal-title">商品详情与数据</h2>
+                <button
+                  onClick={() => handleRefreshDetail(detailModalItem)}
+                  disabled={detailRefreshing}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-md bg-blue-50 text-blue-600 hover:bg-blue-100 dark:bg-blue-900/30 dark:text-blue-400 disabled:opacity-50 transition-colors"
+                  title="从闲鱼拉取最新数据"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${detailRefreshing ? 'animate-spin' : ''}`} />
+                  {detailRefreshing ? '刷新中...' : '刷新平台数据'}
+                </button>
+              </div>
+              <button onClick={() => setDetailModalItem(null)} className="modal-close">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="modal-body space-y-5">
+              {/* 流量数据卡片 */}
+              <div className="grid grid-cols-3 gap-3">
+                <div className="p-3 bg-blue-50/50 dark:bg-blue-950/20 rounded-xl border border-blue-100 dark:border-blue-900/50 text-center">
+                  <div className="text-xs text-blue-600 dark:text-blue-400 font-medium">浏览量</div>
+                  <div className="text-xl font-bold text-blue-900 dark:text-blue-100 mt-1">
+                    {detailModalItem.browse_count ?? '-'}
+                  </div>
+                </div>
+                <div className="p-3 bg-rose-50/50 dark:bg-rose-950/20 rounded-xl border border-rose-100 dark:border-rose-900/50 text-center">
+                  <div className="text-xs text-rose-600 dark:text-rose-400 font-medium">想要数</div>
+                  <div className="text-xl font-bold text-rose-900 dark:text-rose-100 mt-1">
+                    {detailModalItem.want_count ?? '-'}
+                  </div>
+                </div>
+                <div className="p-3 bg-amber-50/50 dark:bg-amber-950/20 rounded-xl border border-amber-100 dark:border-amber-900/50 text-center">
+                  <div className="text-xs text-amber-600 dark:text-amber-400 font-medium">收藏数</div>
+                  <div className="text-xl font-bold text-amber-900 dark:text-amber-100 mt-1">
+                    {detailModalItem.collect_count ?? '-'}
+                  </div>
+                </div>
+              </div>
+
+              {/* 基本信息 */}
+              <div className="space-y-2 text-sm">
+                <div className="flex justify-between items-center py-1.5 border-b border-slate-100 dark:border-slate-800">
+                  <span className="text-slate-500">商品ID</span>
+                  <span className="font-mono text-slate-800 dark:text-slate-200">{detailModalItem.item_id}</span>
+                </div>
+                <div className="flex justify-between items-center py-1.5 border-b border-slate-100 dark:border-slate-800">
+                  <span className="text-slate-500">售价</span>
+                  <span className="font-semibold text-rose-600 dark:text-rose-400">
+                    {detailModalItem.item_price || (detailModalItem.price ? `¥${detailModalItem.price}` : '-')}
+                  </span>
+                </div>
+                <div className="py-1.5 border-b border-slate-100 dark:border-slate-800">
+                  <span className="text-slate-500 block mb-1">商品标题</span>
+                  <span className="font-medium text-slate-900 dark:text-slate-100">
+                    {detailModalItem.item_title || detailModalItem.title || '-'}
+                  </span>
+                </div>
+              </div>
+
+              {/* 全部图片展示 */}
+              <div>
+                <label className="input-label mb-2 block">商品图片</label>
+                {(() => {
+                  const imgs: string[] = []
+                  if (Array.isArray(detailModalItem.images) && detailModalItem.images.length > 0) {
+                    imgs.push(...detailModalItem.images)
+                  } else if (Array.isArray(detailModalItem.image_infos)) {
+                    for (const info of detailModalItem.image_infos) {
+                      if (info && info.url) imgs.push(info.url)
+                    }
+                  }
+                  if (imgs.length === 0) {
+                    return <div className="text-xs text-slate-400 italic">暂无图片数据（点击上方「刷新平台数据」获取）</div>
+                  }
+                  return (
+                    <div className="grid grid-cols-4 gap-2.5">
+                      {imgs.map((url, idx) => (
+                        <a key={idx} href={url} target="_blank" rel="noreferrer" className="group relative block aspect-square rounded-lg overflow-hidden border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800">
+                          <img src={url} alt={`商品图 ${idx + 1}`} className="w-full h-full object-cover group-hover:scale-105 transition-transform" />
+                          <div className="absolute inset-0 bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white text-xs">
+                            点击看大图
+                          </div>
+                        </a>
+                      ))}
+                    </div>
+                  )
+                })()}
+              </div>
+
+              {/* 商品详情文案 */}
+              <div>
+                <label className="input-label mb-1.5 block">详情文案</label>
+                <div className="p-3.5 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-200/80 dark:border-slate-700/80 text-sm text-slate-700 dark:text-slate-300 whitespace-pre-wrap max-h-60 overflow-y-auto leading-relaxed">
+                  {detailModalItem.full_desc || detailModalItem.item_description || detailModalItem.desc || '暂无详情文案（点击上方「刷新平台数据」获取）'}
+                </div>
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button
+                type="button"
+                onClick={() => setDetailModalItem(null)}
+                className="btn-ios-secondary"
+              >
+                关闭
               </button>
             </div>
           </div>
