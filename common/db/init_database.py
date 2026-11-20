@@ -2201,6 +2201,10 @@ class DatabaseInitializer:
         "xy_catalog_items": [
             ("ai_prompt", "TEXT COMMENT '商品AI提示词'", "price"),
             ("is_polished", "TINYINT(1) DEFAULT 0 COMMENT '是否擦亮'", "ai_prompt"),
+            ("browse_count", "INT DEFAULT 0 COMMENT '浏览量'", "is_polished"),
+            ("want_count", "INT DEFAULT 0 COMMENT '想要数'", "browse_count"),
+            ("collect_count", "INT DEFAULT 0 COMMENT '收藏数'", "want_count"),
+            ("full_desc", "MEDIUMTEXT COMMENT '商品完整详情文案'", "collect_count"),
             ("updated_at", "DATETIME COMMENT '更新时间'", "created_at"),
         ],
         "xy_announcements": [
