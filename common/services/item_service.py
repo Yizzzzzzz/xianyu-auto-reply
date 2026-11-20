@@ -1215,9 +1215,10 @@ class ItemService:
             img.get("url") for img in image_infos if isinstance(img, dict) and img.get("url")
         ]
 
-        item.browse_count = browse_count
-        item.want_count = want_count
-        item.collect_count = collect_count
+        if not res.get("fallback_source") or browse_count > 0:
+            item.browse_count = browse_count
+            item.want_count = want_count
+            item.collect_count = collect_count
         if desc:
             item.full_desc = desc
 
@@ -1232,12 +1233,17 @@ class ItemService:
         flag_modified(item, "metadata_json")
 
         await self.session.commit()
+        msg = (
+            "商品详情刷新成功（文案与图片已更新；流量数据受平台风控RGV587拦截未能获取）"
+            if res.get("fallback_source")
+            else "商品详情刷新成功"
+        )
         logger.info(
-            f"【{account.account_id}】商品[{item_id}]详情刷新成功: 浏览={browse_count}, 想要={want_count}, 收藏={collect_count}"
+            f"【{account.account_id}】商品[{item_id}]详情刷新成功: 来源={res.get('fallback_source') or 'mtop.pc.detail'}, 浏览={item.browse_count}, 想要={item.want_count}"
         )
         return {
             "success": True,
-            "message": "商品详情刷新成功",
+            "message": msg,
             "data": self._serialize_item(item, account.account_id),
         }
 
