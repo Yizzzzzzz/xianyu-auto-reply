@@ -43,6 +43,9 @@ async def batch_offline_items_from_xianyu(
     cookies_str: str,
     item_ids: list[str],
     retry_count: int = 0,
+    *,
+    account_row_id: int | None = None,
+    owner_id: int | None = None,
 ) -> dict:
     """调用闲鱼 mtop 接口批量下架商品
 
@@ -78,6 +81,53 @@ async def batch_offline_items_from_xianyu(
             "fail_count": 0,
             "results": [],
             "cookies_str": cookies_str,
+        }
+
+    # 账号能力检测：个人号无法使用 COMMONPRO 批量下架接口，转用个人版 mtop.taobao.idle.item.downshelf (v2.0)
+    from common.services.xianyu_publish_service import detect_publish_account_capability
+    import asyncio
+    cap = await detect_publish_account_capability(cookies_str, account_id=account_id, owner_id=owner_id)
+    if not cap.get("is_fish_shop"):
+        from common.services.xianyu_mtop import mtop_call
+        results = []
+        suc_count = 0
+        fail_count = 0
+        curr_cookie = cookies_str
+        for idx, item_id in enumerate(cleaned_ids):
+            if idx > 0:
+                await asyncio.sleep(1.0)
+            res = await mtop_call(
+                account_id=account_id,
+                cookies_str=curr_cookie,
+                api="mtop.taobao.idle.item.downshelf",
+                version="2.0",
+                data={"itemId": str(item_id)},
+                owner_id=owner_id,
+                origin="https://www.goofish.com",
+                referer="https://www.goofish.com/",
+            )
+            curr_cookie = res.get("cookies_str") or curr_cookie
+            mtop_res = res.get("res") if isinstance(res.get("res"), dict) else {}
+            ret = mtop_res.get("ret") or []
+            ret_str = ret[0] if ret else ""
+            biz_data = mtop_res.get("data") or {}
+            is_ok = ("SUCCESS" in ret_str) and (biz_data.get("success") is True or res.get("success"))
+            if is_ok:
+                suc_count += 1
+                results.append({"item_id": item_id, "success": True})
+                logger.info(f"【{account_id}】个人版下架商品[{item_id}]成功")
+            else:
+                fail_count += 1
+                err_msg = res.get("error") or biz_data.get("msg") or ret_str or "下架失败"
+                results.append({"item_id": item_id, "success": False, "message": err_msg})
+                logger.warning(f"【{account_id}】个人版下架商品[{item_id}]失败: {err_msg}")
+        return {
+            "success": suc_count > 0,
+            "message": f"下架成功 {suc_count} 个，失败 {fail_count} 个",
+            "suc_count": suc_count,
+            "fail_count": fail_count,
+            "results": results,
+            "cookies_str": curr_cookie,
         }
 
     try:
