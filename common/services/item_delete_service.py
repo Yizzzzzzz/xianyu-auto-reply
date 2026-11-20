@@ -336,6 +336,27 @@ async def delete_item_from_xianyu(
             "cookie_saved": True,
             "cookie_message": "未调用删除接口",
         }
+    from common.services.xianyu_publish_service import detect_publish_account_capability
+    cap = await detect_publish_account_capability(cookies_str, account_id=account_id, owner_id=owner_id)
+    if not cap.get("is_fish_shop"):
+        from common.services.item_offline_service import batch_offline_items_from_xianyu
+        offline_res = await batch_offline_items_from_xianyu(
+            account_id=account_id,
+            cookies_str=cookies_str,
+            item_ids=[clean_item_id],
+            account_row_id=account_row_id,
+            owner_id=owner_id,
+        )
+        ok = offline_res.get("suc_count", 0) > 0
+        return {
+            "success": ok,
+            "message": offline_res.get("message") or ("下架成功" if ok else "下架失败"),
+            "item_id": clean_item_id,
+            "cookies_str": offline_res.get("cookies_str") or cookies_str,
+            "cookie_saved": True,
+            "cookie_message": "已通过个人版下架接口处理",
+        }
+
     async with aiohttp.ClientSession() as http_session:
         return await _delete_item_with_session(
             http_session=http_session,
@@ -365,6 +386,25 @@ async def batch_delete_items_from_xianyu(
             "success_count": 0,
             "fail_count": 0,
             "results": [],
+        }
+
+    from common.services.xianyu_publish_service import detect_publish_account_capability
+    cap = await detect_publish_account_capability(cookies_str, account_id=account_id, owner_id=owner_id)
+    if not cap.get("is_fish_shop"):
+        from common.services.item_offline_service import batch_offline_items_from_xianyu
+        offline_res = await batch_offline_items_from_xianyu(
+            account_id=account_id,
+            cookies_str=cookies_str,
+            item_ids=cleaned_ids,
+            account_row_id=account_row_id,
+            owner_id=owner_id,
+        )
+        return {
+            "success": bool(offline_res.get("success")),
+            "message": offline_res.get("message", "个人号商品已通过下架接口处理"),
+            "success_count": offline_res.get("suc_count", 0),
+            "fail_count": offline_res.get("fail_count", 0),
+            "results": offline_res.get("results", []),
         }
 
     current_cookies = cookies_str
