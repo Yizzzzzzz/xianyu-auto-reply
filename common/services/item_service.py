@@ -27,6 +27,8 @@ from common.models.xy_catalog_item import XYCatalogItem
 from common.models.default_reply import DefaultReply
 from common.models.card import Card
 
+MAX_BACKFILL_PER_SYNC = 10
+
 
 class ItemService:
     """Read/write operations for catalog items."""
@@ -332,6 +334,15 @@ class ItemService:
             await self.session.rollback()
             return {"success": False, "message": f"保存商品失败: {exc}"}
 
+        page_item_ids = list(
+            dict.fromkeys(
+                str(item.get("id") or item.get("item_id") or "").strip()
+                for item in items
+                if str(item.get("id") or item.get("item_id") or "").strip()
+            )
+        )
+        await self._backfill_missing_item_details(account, page_item_ids)
+
         return {
             "success": True,
             "message": f"获取到第 {page} 页商品，共 {count} 件",
@@ -518,6 +529,15 @@ class ItemService:
             return {"success": False, "message": f"获取商品失败: {exc}"}
         finally:
             await manager.close()
+
+        sync_item_ids = list(
+            dict.fromkeys(
+                str(item.get("id") or item.get("item_id") or "").strip()
+                for item in fetched_items
+                if str(item.get("id") or item.get("item_id") or "").strip()
+            )
+        )
+        await self._backfill_missing_item_details(account, sync_item_ids)
 
         return {
             "success": True,
@@ -1246,6 +1266,92 @@ class ItemService:
             "message": msg,
             "data": self._serialize_item(item, account.account_id),
         }
+
+    async def _backfill_missing_item_details(
+        self,
+        account: XYAccount,
+        item_ids: list[str],
+    ) -> None:
+        """同步后自动补全缺失图片或文案描述的商品详情。
+
+        限制每次同步最多补全 MAX_BACKFILL_PER_SYNC 件，避免阻塞同步过久。
+        单个商品补全失败不中断流程，不影响整体同步结果。
+        """
+        try:
+            if not item_ids or not account or not getattr(account, "id", None):
+                return
+
+            deduped_ids = list(
+                dict.fromkeys(
+                    str(iid).strip()
+                    for iid in item_ids
+                    if str(iid).strip() and not str(iid).strip().startswith("auto_")
+                )
+            )
+            if not deduped_ids:
+                return
+
+            item_map: dict[str, XYCatalogItem] = {}
+            chunk_size = 500
+            for i in range(0, len(deduped_ids), chunk_size):
+                chunk = deduped_ids[i : i + chunk_size]
+                stmt = select(XYCatalogItem).where(
+                    XYCatalogItem.owner_id == account.owner_id,
+                    XYCatalogItem.account_pk == account.id,
+                    XYCatalogItem.item_id.in_(chunk),
+                )
+                rows = (await self.session.execute(stmt)).scalars().all()
+                for row in rows:
+                    item_map[row.item_id] = row
+
+            candidates: list[str] = []
+            for item_id in deduped_ids:
+                record = item_map.get(item_id)
+                if not record:
+                    continue
+
+                meta = record.metadata_json if isinstance(record.metadata_json, dict) else {}
+                has_images = bool(meta.get("image_urls") or meta.get("images"))
+                full_desc = (record.full_desc or "").strip()
+                meta_full_desc = str(meta.get("full_desc") or "").strip()
+                meta_desc = str(meta.get("description") or "").strip()
+                has_desc = bool(full_desc or meta_full_desc or meta_desc)
+
+                if not has_images or not has_desc:
+                    candidates.append(item_id)
+                    if len(candidates) >= MAX_BACKFILL_PER_SYNC:
+                        break
+
+            if not candidates:
+                return
+
+            success_count = 0
+            for item_id in candidates:
+                try:
+                    res = await self.refresh_item_detail(account, item_id)
+                    if isinstance(res, dict) and res.get("success"):
+                        success_count += 1
+                        logger.info(
+                            f"账号[{account.account_id}]商品[{item_id}]详情自动补全成功"
+                        )
+                    else:
+                        err_msg = res.get("message") if isinstance(res, dict) else str(res)
+                        logger.warning(
+                            f"账号[{account.account_id}]商品[{item_id}]详情自动补全失败: {err_msg}"
+                        )
+                except Exception as exc:
+                    await self.session.rollback()
+                    logger.warning(
+                        f"账号[{account.account_id}]商品[{item_id}]详情自动补全异常: {exc}"
+                    )
+
+            logger.info(
+                f"账号[{account.account_id}]商品详情自动补全完成: 成功 {success_count}/{len(candidates)} 件"
+            )
+        except Exception as exc:
+            logger.warning(
+                f"账号[{account.account_id}]商品详情自动补全流程异常: {exc}"
+            )
 
     def _serialize_item(self, item: XYCatalogItem, account_id: str, default_reply_info: dict | None = None, has_card: bool = False) -> dict:
         metadata = item.metadata_json or {}
