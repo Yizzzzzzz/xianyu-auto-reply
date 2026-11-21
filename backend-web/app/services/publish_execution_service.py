@@ -17,6 +17,11 @@ from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.paths import STATIC_ROOT
+from app.services.account_service import AccountService
+from app.services.platform_category_service import (
+    CategoryRecommendationError,
+    PlatformCategoryService,
+)
 from app.services.publish_address_service import PublishAddressService
 from app.services.publish_batch_status_service import PublishBatchStatusService
 from app.services.item_service import ItemService
@@ -235,6 +240,67 @@ class PublishExecutorService:
         item_data: dict,
     ) -> Dict[str, Any]:
         """单品发布"""
+        item_data = item_data or {}
+        has_category = any(
+            item_data.get(k) is not None and str(item_data.get(k)).strip() != ""
+            for k in (
+                "platform_category_id",
+                "platform_channel_category_id",
+                "platform_leaf_id",
+                "platform_tb_category_id",
+            )
+        )
+
+        if not has_category:
+            account_service = AccountService(self.session)
+            account = await account_service.get_account_for_user(user_id, account_id)
+            if account and account.cookie and account.cookie.strip():
+                title = str(item_data.get("title") or "").strip()
+                description = str(item_data.get("description") or "").strip()
+                rec_title = title or description[:200]
+                rec_description = description or title
+
+                try:
+                    category_service = PlatformCategoryService()
+                    rec_result = await category_service.recommend(
+                        title=rec_title,
+                        description=rec_description,
+                        cookie=account.cookie,
+                        account_id=account.account_id,
+                        owner_id=account.owner_id,
+                    )
+                    candidates = rec_result.get("candidates") if isinstance(rec_result, dict) else []
+                    if not candidates:
+                        logger.warning(
+                            f"未选择分类且自动推荐无结果: account_id={account_id}, title={title}"
+                        )
+                        return {
+                            "success": False,
+                            "message": "未选择分类，自动推荐也没有结果，请在页面手动选择分类后再发布",
+                        }
+
+                    candidate = next((c for c in candidates if c.get("is_selected")), candidates[0])
+                    item_data["platform_category_id"] = candidate.get("cat_id")
+                    item_data["platform_category_name"] = candidate.get("cat_name")
+                    item_data["platform_channel_category_id"] = candidate.get("channel_cat_id")
+                    item_data["platform_channel_category_name"] = candidate.get("channel_cat_name")
+                    item_data["platform_leaf_id"] = candidate.get("leaf_id")
+                    item_data["platform_tb_category_id"] = candidate.get("tb_cat_id")
+                    item_data["platform_category_path"] = candidate.get("path") or []
+                    item_data["category_source"] = "recommendation"
+                    logger.info(
+                        f"发布商品自动补全分类成功: account_id={account_id}, title={title}, "
+                        f"cat_id={candidate.get('cat_id')}, cat_name={candidate.get('cat_name')}"
+                    )
+                except CategoryRecommendationError as exc:
+                    logger.warning(
+                        f"未选择分类且自动推荐异常: account_id={account_id}, title={title}, error={exc}"
+                    )
+                    return {
+                        "success": False,
+                        "message": "未选择分类，自动推荐也没有结果，请在页面手动选择分类后再发布",
+                    }
+
         return await execute_single_publish(
             session=self.session,
             user_id=user_id,

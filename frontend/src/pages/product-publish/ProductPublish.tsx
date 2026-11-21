@@ -233,6 +233,13 @@ export function ProductPublish() {
       })
       if (invalidSku) return addToast({ type: 'warning', message: '请完善所有规格的价格和库存' })
     }
+    const hasCategory = Boolean(
+      form.platform_category_id?.trim()
+        || form.platform_channel_category_id?.trim()
+        || form.platform_leaf_id?.trim()
+        || form.platform_tb_category_id?.trim(),
+    )
+    if (!hasCategory) return addToast({ type: 'warning', message: '请先选择商品分类' })
     setSubmitting(true); setResult(null)
     try {
       const response = await publishSingle({

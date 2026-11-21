@@ -201,6 +201,13 @@ async def _fetch_personal_edit_detail(
     return cookie, data, None
 
 
+def _translate_edit_error(message: str) -> str:
+    """如果报错包含移动端发布不支持网页编辑的错误码，翻译为可读提示。"""
+    if "FAIL_BIZ_PC_NOT_SUPPORT_PUBLISH_OR_EDIT" in message:
+        return "该商品是在闲鱼App上架的，网页端无法修改，请到闲鱼App里改"
+    return message
+
+
 def _business_failure_message(res: dict[str, Any]) -> str:
     """从 edit 接口返回识别业务失败提示。"""
     data = res.get("data") if isinstance(res.get("data"), dict) else {}
@@ -213,10 +220,10 @@ def _business_failure_message(res: dict[str, Any]) -> str:
             break
     for key in ("success", "isSuccess"):
         if key in data and data.get(key) in (False, "false", "False"):
-            return message or "闲鱼返回编辑失败"
+            return _translate_edit_error(message or "闲鱼返回编辑失败")
     code = _text(data.get("code")) or _text(data.get("errorCode"))
     if code and code not in _SUCCESS_CODES:
-        return message or f"闲鱼返回编辑失败（code={code}）"
+        return _translate_edit_error(message or f"闲鱼返回编辑失败（code={code}）")
     return ""
 
 
@@ -385,17 +392,26 @@ async def edit_personal_item(
     ret = res.get("ret") or []
     ret_str = ret[0] if ret else ""
     if ret_str and "SUCCESS" not in ret_str:
-        return _fail(f"闲鱼接口编辑失败：{ret_str}", account_invalid=False, cookie=cookie)
+        logger.warning(
+            f"闲鱼个人号商品编辑失败: account_id={account_id}, item_id={item_id}, error={ret_str}"
+        )
+        return _fail(f"闲鱼接口编辑失败：{_translate_edit_error(ret_str)}", account_invalid=False, cookie=cookie)
 
     biz_data = res.get("data")
     if isinstance(biz_data, dict):
         code = str(biz_data.get("code") or biz_data.get("errorCode") or "")
         if code and code not in _SUCCESS_CODES:
             msg = biz_data.get("msg") or biz_data.get("errorMsg") or f"code={code}"
-            return _fail(f"闲鱼接口编辑失败：{msg}", account_invalid=False, cookie=cookie)
+            logger.warning(
+                f"闲鱼个人号商品编辑业务失败: account_id={account_id}, item_id={item_id}, error={msg}"
+            )
+            return _fail(f"闲鱼接口编辑失败：{_translate_edit_error(str(msg))}", account_invalid=False, cookie=cookie)
         if biz_data.get("success") is False:
             msg = biz_data.get("msg") or biz_data.get("errorMsg") or "业务处理失败"
-            return _fail(f"闲鱼接口编辑失败：{msg}", account_invalid=False, cookie=cookie)
+            logger.warning(
+                f"闲鱼个人号商品编辑业务失败: account_id={account_id}, item_id={item_id}, error={msg}"
+            )
+            return _fail(f"闲鱼接口编辑失败：{_translate_edit_error(str(msg))}", account_invalid=False, cookie=cookie)
 
     return {
         "success": True,
