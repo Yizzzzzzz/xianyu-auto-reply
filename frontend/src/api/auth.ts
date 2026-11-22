@@ -127,15 +127,14 @@ export const sendVerificationCode = async (email: string, type: string, sessionI
 export const register = (data: { 
   username: string
   password: string
+  phone?: string
   email?: string
-  verification_code?: string
-  session_id?: string
 }): Promise<ApiResponse> => {
   return post(`${AUTH_PREFIX}/register`, {
     username: data.username,
     password: data.password,
+    phone: data.phone,
     email: data.email,
-    verification_code: data.verification_code,
   })
 }
 

@@ -16,10 +16,9 @@ class UserBase(BaseModel):
 
 
 class UserCreate(UserBase):
-    phone: str = Field(pattern=r"^1[3-9]\d{9}$", description="手机号")
+    phone: Optional[str] = Field(default=None, pattern=r"^1[3-9]\d{9}$", description="手机号")
     email: Optional[EmailStr] = None
     password: str = Field(min_length=6, max_length=128)
-    verification_code: Optional[str] = Field(default=None, max_length=6, description="邮箱验证码")
 
 
 class AdminUserCreate(UserBase):

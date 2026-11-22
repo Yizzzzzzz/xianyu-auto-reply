@@ -24,7 +24,7 @@ export interface AdminUserApiItem {
 
 export interface CreateAdminUserPayload {
   username: string
-  email: string
+  email?: string
   phone?: string
   password: string
   role: UserRole

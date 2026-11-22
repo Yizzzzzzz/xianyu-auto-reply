@@ -14,7 +14,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api import deps
 from loguru import logger
 from app.services.login_flow_service import perform_login
-from common.services.auth_rate_limit_service import AuthRateLimitRejected, check_registration_limit
 from common.db.session_recovery import rollback_session
 from common.services.email_domain_policy import EmailDomainRejected, enforce_email_domain
 from common.services.email_verification_code_service import check_email_code
@@ -150,33 +149,32 @@ async def check_default_password(
 @router.post("/register", response_model=ApiResponse)
 async def register_user(
     payload: UserCreate,
-    request: Request,
     user_service: UserService = Depends(deps.get_user_service),
     setting_service: SystemSettingService = Depends(deps.get_system_setting_service),
 ) -> ApiResponse:
-    """按当前注册开关与邮箱验证码创建用户。
+    """按当前注册开关创建用户。
 
     Args:
-        payload: 用户注册资料与邮箱验证码。
-        request: 请求对象，用于公共客户端 IP 获取与注册限流。
+        payload: 用户注册资料。
         user_service: 用户查询与创建服务。
         setting_service: 读取当前注册开关的设置服务。
     Returns:
-        统一业务响应，关闭注册时不消费验证码或创建账号。
+        统一业务响应，关闭注册时不创建账号。
     """
-    # 注册尝试先计数；后缀或开关拒绝也占用额度，且不能消费旧验证码。
+    if payload.email:
+        payload.email = payload.email.strip().lower()
+
     try:
-        await check_registration_limit(get_client_ip(request), payload.email, phone=payload.phone)
         if payload.email:
             await enforce_email_domain(setting_service.session, payload.email)
-    except (EmailDomainRejected, AuthRateLimitRejected) as exc:
+    except EmailDomainRejected as exc:
         return ApiResponse(success=False, code=exc.code, message=str(exc))
     except Exception as exc:
         logger.opt(exception=exc).error("注册策略检查失败：identity={}", payload.email or payload.phone)
         await rollback_session(setting_service.session, operation="注册策略检查")
         return ApiResponse(success=False, code=50001, message="注册校验暂不可用，请稍后重试")
 
-    # 在消费验证码和创建账号前重新读取开关，旧验证码不能绕过已关闭的注册。
+    # 在创建账号前重新读取开关，旧验证码不能绕过已关闭的注册。
     settings = await setting_service.list_settings()
     rejection_message = get_registration_rejection_message(settings)
     if rejection_message:
@@ -185,15 +183,6 @@ async def register_user(
             code=status.HTTP_403_FORBIDDEN,
             message=rejection_message,
         )
-
-    # 验证邮箱验证码
-    if payload.email and payload.verification_code:
-        code_valid, code_msg = check_email_code(payload.email, payload.verification_code, "register")
-        if not code_valid:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=code_msg)
-    elif payload.email:
-        # 有邮箱但没有验证码
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请输入邮箱验证码")
 
     # 检查用户名是否已存在
     existing = await user_service.get_by_username(payload.username)
@@ -204,13 +193,13 @@ async def register_user(
     if payload.phone:
         existing_phone = await user_service.get_by_phone(payload.phone)
         if existing_phone:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="手机号已被注册")
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="当前手机号已经注册")
 
     # 检查邮箱是否已存在
     if payload.email:
         existing_email = await user_service.get_by_email(payload.email)
         if existing_email:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="邮箱已被注册")
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="当前邮箱已经注册")
 
     await user_service.create(payload)
     return ApiResponse(success=True, message="注册成功")

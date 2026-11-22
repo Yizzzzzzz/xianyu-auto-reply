@@ -29,7 +29,7 @@ export function Login() {
   const { showDefaultLogin, loginCaptchaEnabled, loginBranding, authFooterAd } = useLoginPageSettings(isAuthenticated)
 
   // Form states
-  const [username, setUsername] = useState('')
+  const [identifier, setIdentifier] = useState('')
   const [password, setPassword] = useState('')
   const [email, setEmail] = useState('')
   const [emailPassword, setEmailPassword] = useState('')
@@ -157,8 +157,8 @@ export function Login() {
       let loginData: any = {}
 
       if (loginType === 'username') {
-        if (!username || !password) {
-          addToast({ type: 'error', message: '请输入用户名和密码' })
+        if (!identifier || !password) {
+          addToast({ type: 'error', message: '请输入用户名 / 手机号 / 邮箱和密码' })
           setLoading(false)
           return
         }
@@ -169,7 +169,7 @@ export function Login() {
           return
         }
         loginData = { 
-          username, 
+          identifier, 
           password,
           geetest_challenge: geetestResult?.challenge,
           geetest_validate: geetestResult?.validate,
@@ -232,7 +232,7 @@ export function Login() {
 
   const fillDefaultCredentials = () => {
     setLoginType('username')
-    setUsername('admin')
+    setIdentifier('admin')
     setPassword('admin123')
   }
 
@@ -285,14 +285,14 @@ export function Login() {
               {loginType === 'username' && (
                 <>
                   <div className="input-group">
-                    <label className="input-label">用户名</label>
+                    <label className="input-label">用户名 / 手机号 / 邮箱</label>
                     <div className="relative">
                       <User className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                       <input
                         type="text"
-                        value={username}
-                        onChange={(e) => setUsername(e.target.value)}
-                        placeholder="请输入用户名"
+                        value={identifier}
+                        onChange={(e) => setIdentifier(e.target.value)}
+                        placeholder="请输入用户名 / 手机号 / 邮箱"
                         className="input-ios pl-9"
                       />
                     </div>

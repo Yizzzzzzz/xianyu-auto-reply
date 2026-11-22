@@ -96,12 +96,7 @@ export function UserFormModal({ initial, onClose, onSaved }: Props) {
       return
     }
 
-    if (!email) {
-      addToast({ type: 'warning', message: '请输入邮箱' })
-      return
-    }
-
-    if (!/^\S+@\S+\.\S+$/.test(email)) {
+    if (email && !/^\S+@\S+\.\S+$/.test(email)) {
       addToast({ type: 'warning', message: '请输入正确的邮箱地址' })
       return
     }
@@ -133,8 +128,8 @@ export function UserFormModal({ initial, onClose, onSaved }: Props) {
 
       const basePayload = {
         username,
-        email,
-        phone,
+        email: email || undefined,
+        phone: phone || undefined,
         role: form.role,
         status: form.status,
         account_limit: accountLimit,
@@ -192,7 +187,7 @@ export function UserFormModal({ initial, onClose, onSaved }: Props) {
               />
             </div>
             <div className="input-group">
-              <label className="input-label">邮箱 <span className="text-red-500">*</span></label>
+              <label className="input-label">邮箱 <span className="text-xs text-slate-400 font-normal">（可选）</span></label>
               <input
                 className="input-ios"
                 type="email"
