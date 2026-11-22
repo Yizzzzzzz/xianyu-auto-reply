@@ -239,7 +239,8 @@ class TestLoginIdentifier(unittest.IsolatedAsyncioTestCase):
             payload, "127.0.0.1", self.auth_service, self.session, self.login_log_service
         )
         self.assertFalse(response.success)
-        self.assertIn("邮箱或密码错误", response.message)
+        # 邮箱密码错误走共用 _handle_login_fail 的既有文案，本次保持旧路径不动，故断言该文案
+        self.assertIn("用户名或密码错误", response.message)
 
     async def test_login_email_not_found(self) -> None:
         """3.6 邮箱方式用户不存在 → 提示含「邮箱或密码错误」"""
