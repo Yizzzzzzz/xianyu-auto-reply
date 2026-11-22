@@ -32,6 +32,8 @@ from sqlalchemy.pool import StaticPool
 
 from app.core import security
 from app.services.auth import AuthService
+# 先初始化 app.api 路由包，避免 login_flow_service 与 auth 路由之间的循环导入
+import app.api.routes.auth  # noqa: F401
 from app.services.login_flow_service import perform_login
 from app.services.user_login_log_service import (
     LOGIN_METHOD_EMAIL_PASSWORD,
