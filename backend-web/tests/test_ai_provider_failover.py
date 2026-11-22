@@ -21,8 +21,13 @@ import base64
 from datetime import datetime
 import http.server
 import json
+import sys
 import threading
 import unittest
+from unittest.mock import MagicMock
+
+for _mod in ("cv2", "paramiko"):
+    sys.modules.setdefault(_mod, MagicMock())
 
 from cryptography.fernet import Fernet
 from fastapi import HTTPException
@@ -45,11 +50,16 @@ from app.services.ai_provider_crypto import (
 from app.services.ai_provider_failover_service import (
     AiProviderFailoverService,
     AllProvidersFailedError,
+    CHAT_SYSTEM_PROMPT,
+    IDENTIFY_PROMPT,
+    IDENTIFY_PROMPT_KEY,
+    ImageGenerationNotSupportedError,
     LISTING_PROMPT,
     LISTING_PROMPT_KEY,
     PICK_PROMPT,
     PICK_PROMPT_KEY,
     NoProviderConfiguredError,
+    _parse_identify_json,
     _parse_listing_json,
     _parse_pick_json,
 )
@@ -606,17 +616,19 @@ class TestAiProviderFailover(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self._captured_prompt_text("/p1/chat/completions"), expected_prompt)
 
     async def test_get_prompts_returns_defaults_when_unconfigured(self) -> None:
-        """未配置过提示词时 GET 返回默认提示词 + is_default true + updated_at 为空"""
+        """未配置过提示词时 GET 返回三条默认提示词 + 三个 is_default true + updated_at 为空"""
         result = await get_ai_prompts(None, self.session)
 
         self.assertEqual(result["listing_prompt"], LISTING_PROMPT)
         self.assertEqual(result["pick_prompt"], PICK_PROMPT)
+        self.assertEqual(result["identify_prompt"], IDENTIFY_PROMPT)
         self.assertTrue(result["listing_is_default"])
         self.assertTrue(result["pick_is_default"])
+        self.assertTrue(result["identify_is_default"])
         self.assertIsNone(result["updated_at"])
 
     async def test_update_prompts_validation_rejects_bad_values_and_saves_nothing(self) -> None:
-        """校验不过返回 400 且不保存：listing 缺字段、pick 缺 {candidates}、空白值"""
+        """校验不过返回 400 且不保存：listing 缺字段、pick 缺 {candidates}、identify 缺字段、空白值"""
         # listing 缺 search_keyword → 400，数据库里不产生记录
         with self.assertRaises(HTTPException) as ctx:
             await update_ai_prompts(
@@ -639,6 +651,18 @@ class TestAiProviderFailover(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertIsNone(await self._get_prompt_setting(PICK_PROMPT_KEY))
 
+        # identify 缺字段名 → 400，数据库里不产生记录
+        with self.assertRaises(HTTPException) as ctx:
+            await update_ai_prompts(
+                AiPromptsUpdateRequest(
+                    identify_prompt="识物提示词 只有 name 和 category 缺失其他两个词"
+                ),
+                None,
+                self.session,
+            )
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIsNone(await self._get_prompt_setting(IDENTIFY_PROMPT_KEY))
+
         # 空白提示词 → 400
         with self.assertRaises(HTTPException) as ctx:
             await update_ai_prompts(
@@ -650,7 +674,7 @@ class TestAiProviderFailover(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self._get_prompt_setting(LISTING_PROMPT_KEY))
 
     async def test_update_then_reset_prompts_restores_defaults(self) -> None:
-        """PUT 保存后 GET 读到新值；POST reset 后回到默认提示词且数据库行已删除"""
+        """PUT 保存后 GET 读到新值；POST reset 后回到三条默认提示词且数据库行已删除"""
         custom_listing = "自定义 title description category search_keyword 提示词"
 
         updated = await update_ai_prompts(
@@ -661,26 +685,250 @@ class TestAiProviderFailover(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated["listing_prompt"], custom_listing)
         self.assertFalse(updated["listing_is_default"])
         self.assertTrue(updated["pick_is_default"])
+        self.assertTrue(updated["identify_is_default"])
         self.assertIsNotNone(updated["updated_at"])
 
         got = await get_ai_prompts(None, self.session)
         self.assertEqual(got["listing_prompt"], custom_listing)
         self.assertFalse(got["listing_is_default"])
+        self.assertTrue(got["pick_is_default"])
+        self.assertTrue(got["identify_is_default"])
+
+        # 再修改 identify 提示词
+        custom_identify = "自定义 name category description search_keyword 拍照识物提示词"
+        updated_id = await update_ai_prompts(
+            AiPromptsUpdateRequest(identify_prompt=custom_identify),
+            None,
+            self.session,
+        )
+        self.assertEqual(updated_id["identify_prompt"], custom_identify)
+        self.assertFalse(updated_id["identify_is_default"])
+        self.assertFalse(updated_id["listing_is_default"])
+
+        got_id = await get_ai_prompts(None, self.session)
+        self.assertEqual(got_id["identify_prompt"], custom_identify)
+        self.assertFalse(got_id["identify_is_default"])
 
         reset = await reset_ai_prompts(None, self.session)
         self.assertEqual(reset["listing_prompt"], LISTING_PROMPT)
         self.assertEqual(reset["pick_prompt"], PICK_PROMPT)
+        self.assertEqual(reset["identify_prompt"], IDENTIFY_PROMPT)
         self.assertTrue(reset["listing_is_default"])
         self.assertTrue(reset["pick_is_default"])
+        self.assertTrue(reset["identify_is_default"])
 
         rows = (
             await self.session.execute(
                 select(SystemSetting).where(
-                    SystemSetting.key.in_([LISTING_PROMPT_KEY, PICK_PROMPT_KEY])
+                    SystemSetting.key.in_([LISTING_PROMPT_KEY, PICK_PROMPT_KEY, IDENTIFY_PROMPT_KEY])
                 )
             )
         ).scalars().all()
         self.assertEqual(rows, [])
+
+    # ==================== 12. 拍照识物 identify 测试 ====================
+
+    def test_identify_json_parsing(self) -> None:
+        """测试拍照识物 JSON 解析、markdown 代码块去壳、字段缺失校验"""
+        # 标准 JSON
+        raw_1 = json.dumps(
+            {
+                "name": "罗技 G304 鼠标",
+                "category": "电脑配件",
+                "description": "罗技 G304 无线鼠标，九成新自用，成色完好，反应灵敏。",
+                "search_keyword": "罗技G304",
+            },
+            ensure_ascii=False,
+        )
+        res_1 = _parse_identify_json(raw_1)
+        self.assertEqual(res_1["name"], "罗技 G304 鼠标")
+        self.assertEqual(res_1["category"], "电脑配件")
+        self.assertEqual(res_1["search_keyword"], "罗技G304")
+
+        # markdown 代码块包裹
+        raw_2 = f"```json\n{raw_1}\n```"
+        res_2 = _parse_identify_json(raw_2)
+        self.assertEqual(res_2["name"], "罗技 G304 鼠标")
+
+        # category 缺失默认“其他”，search_keyword 缺失默认空串
+        raw_3 = json.dumps(
+            {
+                "name": "普通水杯",
+                "description": "陶瓷水杯，日常喝水使用。",
+            },
+            ensure_ascii=False,
+        )
+        res_3 = _parse_identify_json(raw_3)
+        self.assertEqual(res_3["category"], "其他")
+        self.assertEqual(res_3["search_keyword"], "")
+
+        # 缺少 name 或 description 抛 ValueError
+        with self.assertRaises(ValueError):
+            _parse_identify_json('{"category": "数码"}')
+        with self.assertRaises(ValueError):
+            _parse_identify_json('{"name": "只有名字"}')
+
+    async def test_identify_item_success_and_failover(self) -> None:
+        """测试 identify 成功解析并返回正确字段，容灾切换 provider_used 正确"""
+        success_content = json.dumps(
+            {
+                "name": "索尼 WH-1000XM4 耳机",
+                "category": "影音电器",
+                "description": "索尼降噪头戴耳机，支持蓝牙与降噪，成色良好。",
+                "search_keyword": "索尼XM4",
+            },
+            ensure_ascii=False,
+        )
+        self.mock_server.set_route(
+            "/p1/chat/completions",
+            200,
+            {"choices": [{"message": {"role": "assistant", "content": f"```json\n{success_content}\n```"}}]},
+        )
+        await self._add_provider(name="Provider 1", path="/p1", priority=10)
+
+        service = AiProviderFailoverService(session=self.session, fernet_key=self.fernet_key)
+        res = await service.identify_item(self.sample_image_bytes, hint="索尼耳机")
+
+        self.assertEqual(res["name"], "索尼 WH-1000XM4 耳机")
+        self.assertEqual(res["category"], "影音电器")
+        self.assertEqual(res["description"], "索尼降噪头戴耳机，支持蓝牙与降噪，成色良好。")
+        self.assertEqual(res["search_keyword"], "索尼XM4")
+        self.assertEqual(res["provider_used"], "Provider 1")
+
+    async def test_identify_item_no_provider_and_all_failed(self) -> None:
+        """测试 identify 无服务商抛 503 文案，全失败抛 AllProvidersFailedError"""
+        service = AiProviderFailoverService(session=self.session, fernet_key=self.fernet_key)
+        with self.assertRaises(NoProviderConfiguredError) as ctx:
+            await service.identify_item(self.sample_image_bytes)
+        self.assertIn("未配置 AI 服务商，请先通过后端接口添加服务商", str(ctx.exception))
+
+        self.mock_server.set_route("/p1/chat/completions", 500, {"error": "Server Error"})
+        await self._add_provider(name="Provider 1", path="/p1", priority=10)
+
+        with self.assertRaises(AllProvidersFailedError):
+            await service.identify_item(self.sample_image_bytes)
+
+    # ==================== 13. 对话追问 chat 测试 ====================
+
+    async def test_chat_success_and_messages_structure(self) -> None:
+        """测试 chat 发送给上游的请求体包含 system prompt 且原样保留后续历史（含图片视觉消息）"""
+        self.mock_server.set_route(
+            "/p1/chat/completions",
+            200,
+            {"choices": [{"message": {"role": "assistant", "content": "这是一款机械键盘，带有青轴。"}}]},
+        )
+        await self._add_provider(name="Provider 1", path="/p1", priority=10)
+
+        service = AiProviderFailoverService(session=self.session, fernet_key=self.fernet_key)
+        history = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "这是什么？"},
+                    {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,xxxx"}},
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": "这是一个键盘。",
+            },
+            {
+                "role": "user",
+                "content": "什么轴体的？",
+            },
+        ]
+        res = await service.chat(messages=history)
+        self.assertEqual(res["reply"], "这是一款机械键盘，带有青轴。")
+        self.assertEqual(res["provider_used"], "Provider 1")
+
+        # 断言发送给上游的请求体
+        raw = self.mock_server.received_bodies.get("/p1/chat/completions", b"")
+        payload = json.loads(raw.decode("utf-8"))
+        sent_messages = payload["messages"]
+        self.assertEqual(sent_messages[0]["role"], "system")
+        self.assertEqual(sent_messages[0]["content"], CHAT_SYSTEM_PROMPT)
+        # 之后的历史原样保留
+        self.assertEqual(sent_messages[1]["role"], "user")
+        self.assertEqual(sent_messages[1]["content"], history[0]["content"])
+        self.assertEqual(sent_messages[1]["content"][1]["type"], "image_url")
+        self.assertEqual(sent_messages[1]["content"][1]["image_url"]["url"], "data:image/jpeg;base64,xxxx")
+        self.assertEqual(sent_messages[2]["role"], "assistant")
+        self.assertEqual(sent_messages[2]["content"], "这是一个键盘。")
+        self.assertEqual(sent_messages[3]["role"], "user")
+        self.assertEqual(sent_messages[3]["content"], "什么轴体的？")
+
+    async def test_chat_no_provider_raises_503(self) -> None:
+        """测试 chat 无服务商时抛出 NoProviderConfiguredError"""
+        service = AiProviderFailoverService(session=self.session, fernet_key=self.fernet_key)
+        with self.assertRaises(NoProviderConfiguredError) as ctx:
+            await service.chat([{"role": "user", "content": "你好"}])
+        self.assertIn("未配置 AI 服务商，请先通过后端接口添加服务商", str(ctx.exception))
+
+    # ==================== 14. 绘画 generate_image 测试 ====================
+
+    async def test_generate_image_success(self) -> None:
+        """测试 generate_image 成功返回 b64_json 与 provider_used"""
+        self.mock_server.set_route(
+            "/p1/images/generations",
+            200,
+            {"data": [{"b64_json": "fake_b64_image_data_12345"}]},
+        )
+        await self._add_provider(name="Provider 1", path="/p1", priority=10)
+
+        service = AiProviderFailoverService(session=self.session, fernet_key=self.fernet_key)
+        res = await service.generate_image("一只可爱的橘猫")
+        self.assertEqual(res["image_base64"], "fake_b64_image_data_12345")
+        self.assertEqual(res["provider_used"], "Provider 1")
+
+        # 检查上游收到的请求体
+        raw = self.mock_server.received_bodies.get("/p1/images/generations", b"")
+        payload = json.loads(raw.decode("utf-8"))
+        self.assertEqual(payload["prompt"], "一只可爱的橘猫")
+        self.assertEqual(payload["response_format"], "b64_json")
+
+    async def test_generate_image_404_raises_not_supported(self) -> None:
+        """测试上游返回 404 时抛 ImageGenerationNotSupportedError 且信息以'当前服务商不支持图片生成'开头"""
+        self.mock_server.set_route(
+            "/p1/images/generations",
+            404,
+            {"error": {"message": "Not Found"}},
+        )
+        await self._add_provider(name="Provider 1", path="/p1", priority=10)
+
+        service = AiProviderFailoverService(session=self.session, fernet_key=self.fernet_key)
+        with self.assertRaises(ImageGenerationNotSupportedError) as ctx:
+            await service.generate_image("画一幅画")
+
+        self.assertTrue(str(ctx.exception).startswith("当前服务商不支持图片生成"))
+        self.assertIn("Provider 1", str(ctx.exception))
+
+    async def test_generate_image_400_unsupported_raises_not_supported(self) -> None:
+        """测试上游返回 400 且含 unsupported 时抛 ImageGenerationNotSupportedError"""
+        self.mock_server.set_route(
+            "/p1/images/generations",
+            400,
+            {"error": {"message": "This model is unsupported for image generation"}},
+        )
+        await self._add_provider(name="Provider 1", path="/p1", priority=10)
+
+        service = AiProviderFailoverService(session=self.session, fernet_key=self.fernet_key)
+        with self.assertRaises(ImageGenerationNotSupportedError) as ctx:
+            await service.generate_image("画一幅画")
+
+        self.assertTrue(str(ctx.exception).startswith("当前服务商不支持图片生成"))
+
+    async def test_generate_image_500_raises_all_providers_failed(self) -> None:
+        """测试上游返回 500 时抛 AllProvidersFailedError（非不支持异常）"""
+        self.mock_server.set_route(
+            "/p1/images/generations",
+            500,
+            {"error": {"message": "Internal Server Error"}},
+        )
+        await self._add_provider(name="Provider 1", path="/p1", priority=10)
+
+        service = AiProviderFailoverService(session=self.session, fernet_key=self.fernet_key)
+        with self.assertRaises(AllProvidersFailedError):
+            await service.generate_image("画一幅画")
 
 
 if __name__ == "__main__":
