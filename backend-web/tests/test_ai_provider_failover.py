@@ -903,11 +903,15 @@ class TestAiProviderFailover(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Provider 1", str(ctx.exception))
 
     async def test_generate_image_400_unsupported_raises_not_supported(self) -> None:
-        """测试上游返回 400 且含 unsupported 时抛 ImageGenerationNotSupportedError"""
+        """测试上游返回 400 且含七牛云 deepseek 真实错误文本（含 image/model）时抛 ImageGenerationNotSupportedError"""
         self.mock_server.set_route(
             "/p1/images/generations",
             400,
-            {"error": {"message": "This model is unsupported for image generation"}},
+            {
+                "error": {
+                    "message": "There are no images in the model's response. Please optimize your prompt to ensure a clear intention for generating images."
+                }
+            },
         )
         await self._add_provider(name="Provider 1", path="/p1", priority=10)
 
@@ -916,6 +920,20 @@ class TestAiProviderFailover(unittest.IsolatedAsyncioTestCase):
             await service.generate_image("画一幅画")
 
         self.assertTrue(str(ctx.exception).startswith("当前服务商不支持图片生成"))
+        self.assertIn("Provider 1", str(ctx.exception))
+
+    async def test_generate_image_400_normal_error_raises_all_providers_failed(self) -> None:
+        """测试上游返回 400 但错误文本既不含 image 也不含 model（普通失败）时抛 AllProvidersFailedError"""
+        self.mock_server.set_route(
+            "/p1/images/generations",
+            400,
+            {"error": {"message": "Bad request: prompt too long"}},
+        )
+        await self._add_provider(name="Provider 1", path="/p1", priority=10)
+
+        service = AiProviderFailoverService(session=self.session, fernet_key=self.fernet_key)
+        with self.assertRaises(AllProvidersFailedError):
+            await service.generate_image("画一幅画")
 
     async def test_generate_image_500_raises_all_providers_failed(self) -> None:
         """测试上游返回 500 时抛 AllProvidersFailedError（非不支持异常）"""
