@@ -28,6 +28,7 @@ from common.services.ai_provider_service import build_openai_url, extract_respon
 # 保存后下一次调用即生效；无自定义值（未配置或为空）时回退到代码里的默认常量。
 LISTING_PROMPT_KEY = "ai.prompts.listing"
 PICK_PROMPT_KEY = "ai.prompts.pick"
+IDENTIFY_PROMPT_KEY = "ai.prompts.identify"
 
 # 固定提示词：后端定义，无需前端传入
 LISTING_PROMPT = """你是一个专业的闲鱼二手交易平台商品发布助手。请仔细观察提供的商品图片，并生成适合在闲鱼发布的商品信息。
@@ -56,6 +57,18 @@ PICK_PROMPT = """你是一个专业的闲鱼二手交易平台定价助手。请
 3. suggested_price 以挑中那条的价格为基准，结合成色差异可小幅调整，必须大于 0；不要凭空编一个和候选价格无关的数字。
 4. reason 用一句话说明为什么挑这一条（20 字以内）。
 """
+
+
+IDENTIFY_PROMPT = """你是一个专业的闲鱼二手交易平台物品识别助手。请仔细观察提供的图片，识别图中的物品并生成结构化介绍。
+
+要求：
+1. name: 这是什么物品（写实，包含品牌、品类或核心识别名称）。
+2. category: 精确的商品分类名称（如：数码产品、手机数码、居家日用、服饰鞋包、运动户外等）。
+3. description: 物品详细介绍（这是什么东西、干嘛用的、怎么用，200-500字，写实不夸大）。图里印着的型号、参数如果看得清就写进介绍，不要编造图里没有的。
+4. search_keyword: 用于去闲鱼搜同款比价的简短核心商品词（2-6 字，如“机械键盘”“收纳盒”），只写商品本身，不要成色、价格或修饰词。
+
+请直接以标准 JSON 格式输出，不要包含任何 markdown 代码块标记，格式如下：
+{"name": "...", "category": "...", "description": "...", "search_keyword": "..."}"""
 
 class AiFailoverError(Exception):
     """AI 容灾服务基类异常"""
@@ -155,6 +168,45 @@ def _parse_pick_json(raw_text: str, count: int) -> dict[str, object]:
         "index": index,
         "suggested_price": suggested_price,
         "reason": str(data.get("reason") or "").strip(),
+    }
+
+
+def _parse_identify_json(raw_text: str) -> dict[str, str]:
+    """从模型返回文本中解析拍照识物 JSON 对象"""
+    text = raw_text.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if len(lines) >= 2 and lines[0].startswith("```"):
+            if lines[-1].strip() == "```":
+                lines = lines[1:-1]
+            else:
+                lines = lines[1:]
+        text = "\n".join(lines).strip()
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        text = text[start : end + 1]
+
+    data = json.loads(text)
+    if not isinstance(data, dict):
+        raise ValueError("返回内容解析后不是有效的 JSON 字典")
+
+    name = str(data.get("name") or "").strip()
+    category = str(data.get("category") or "其他").strip()
+    description = str(data.get("description") or "").strip()
+    search_keyword = str(data.get("search_keyword") or "").strip()
+
+    if not name:
+        raise ValueError("返回 JSON 中缺少 name 字段")
+    if not description:
+        raise ValueError("返回 JSON 中缺少 description 字段")
+
+    return {
+        "name": name,
+        "category": category,
+        "description": description,
+        "search_keyword": search_keyword,
     }
 
 
@@ -481,6 +533,162 @@ class AiProviderFailoverService:
                     "competitor_index": pick["index"],
                     "suggested_price": pick["suggested_price"],
                     "reason": pick["reason"],
+                    "provider_used": provider.name,
+                }
+
+            except httpx.TimeoutException:
+                err_msg = f"请求超时（{int(timeout_sec)}秒）"
+                provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                await self.session.commit()
+                provider_errors.append(f"[{provider.name}] {err_msg}")
+                continue
+            except Exception as exc:
+                err_msg = f"调用异常: {type(exc).__name__}: {str(exc)}"
+                if plain_key and plain_key in err_msg:
+                    err_msg = err_msg.replace(plain_key, "****")
+                provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                await self.session.commit()
+                provider_errors.append(f"[{provider.name}] {err_msg}")
+                continue
+
+        raise AllProvidersFailedError(
+            message="所有 AI 服务商均调用失败",
+            errors=provider_errors,
+        )
+
+    async def identify_item(
+        self,
+        image_bytes: bytes,
+        hint: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """根据商品图片识别物品信息（容灾轮询）
+
+        Args:
+            image_bytes: 图片二进制数据。
+            hint: 可选的补充要求或关键词。
+
+        Returns:
+            dict: {name, category, description, search_keyword, provider_used}
+
+        Raises:
+            NoProviderConfiguredError: 未配置或未启用任何服务商（对应 503）。
+            AllProvidersFailedError: 所有服务商均调用失败（对应 502）。
+        """
+        if not image_bytes:
+            raise ValueError("商品图片不能为空")
+
+        # 1. 查询所有已启用的服务商，按 priority 升序、id 升序排列
+        stmt = (
+            select(AiProviderConfig)
+            .where(AiProviderConfig.is_enabled == True)
+            .order_by(AiProviderConfig.priority.asc(), AiProviderConfig.id.asc())
+        )
+        result = await self.session.execute(stmt)
+        providers = list(result.scalars().all())
+
+        if not providers:
+            raise NoProviderConfiguredError("未配置 AI 服务商，请先通过后端接口添加服务商")
+
+        # 2. 组装提示词与图片数据（提示词每次实时读配置，未配置则用默认常量）
+        prompt_text = await self._get_prompt(IDENTIFY_PROMPT_KEY, IDENTIFY_PROMPT)
+        if hint and hint.strip():
+            prompt_text += f"\n\n补充关键词与要求：{hint.strip()}"
+
+        base64_img = base64.b64encode(image_bytes).decode("utf-8")
+        provider_errors: List[str] = []
+
+        # 3. 逐条轮询尝试
+        for provider in providers:
+            plain_key = ""
+            try:
+                plain_key = decrypt_api_key(provider.api_key, self._get_encryption_key())
+            except Exception as exc:
+                err_msg = f"解密 API Key 失败: {str(exc)}"
+                provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                await self.session.commit()
+                provider_errors.append(f"[{provider.name}] {err_msg}")
+                continue
+
+            url = build_openai_url(provider.base_url, "chat/completions")
+            payload = {
+                "model": provider.model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt_text},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{base64_img}"
+                                },
+                            },
+                        ],
+                    }
+                ],
+                "temperature": 0.7,
+                "max_tokens": 4096,
+            }
+            headers = {
+                "Authorization": f"Bearer {plain_key}",
+                "Content-Type": "application/json",
+            }
+            timeout_sec = float(provider.timeout_seconds or 30)
+
+            try:
+                if self._http_client is not None:
+                    resp = await self._http_client.post(url, json=payload, headers=headers, timeout=timeout_sec)
+                else:
+                    async with _create_async_client(timeout=timeout_sec) as client:
+                        resp = await client.post(url, json=payload, headers=headers)
+
+                if not resp.is_success:
+                    err_summary = extract_response_error(resp)
+                    if plain_key and plain_key in err_summary:
+                        err_summary = err_summary.replace(plain_key, "****")
+                    err_msg = f"HTTP {resp.status_code}: {err_summary}"
+                    provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                    await self.session.commit()
+                    provider_errors.append(f"[{provider.name}] {err_msg}")
+                    continue
+
+                resp_data = resp.json()
+                choices = resp_data.get("choices")
+                if not choices or not isinstance(choices, list):
+                    err_msg = "返回数据中缺少 choices 字段"
+                    provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                    await self.session.commit()
+                    provider_errors.append(f"[{provider.name}] {err_msg}")
+                    continue
+
+                raw_content = choices[0].get("message", {}).get("content", "")
+                if not raw_content or not isinstance(raw_content, str):
+                    _fr = choices[0].get("finish_reason") or ""
+                    err_msg = "返回消息正文为空" + (f"（finish_reason={_fr}，若为 length 说明输出 token 上限被模型思考过程占满）" if _fr else "")
+                    provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                    await self.session.commit()
+                    provider_errors.append(f"[{provider.name}] {err_msg}")
+                    continue
+
+                try:
+                    identified = _parse_identify_json(raw_content)
+                except Exception as exc:
+                    err_msg = f"识别结果解析失败: {str(exc)}"
+                    provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                    await self.session.commit()
+                    provider_errors.append(f"[{provider.name}] {err_msg}")
+                    continue
+
+                # 成功！更新状态并清除历史错误
+                provider.last_error = None
+                provider.last_used_at = datetime.now()
+                await self.session.commit()
+
+                return {
+                    "name": identified["name"],
+                    "category": identified["category"],
+                    "description": identified["description"],
+                    "search_keyword": identified["search_keyword"],
                     "provider_used": provider.name,
                 }
 

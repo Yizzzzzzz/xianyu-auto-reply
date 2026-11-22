@@ -27,6 +27,8 @@ from app.services.ai_provider_crypto import (
 from app.services.ai_provider_failover_service import (
     AiProviderFailoverService,
     AllProvidersFailedError,
+    IDENTIFY_PROMPT,
+    IDENTIFY_PROMPT_KEY,
     LISTING_PROMPT,
     LISTING_PROMPT_KEY,
     PICK_PROMPT,
@@ -132,6 +134,16 @@ class GenerateListingResponse(BaseModel):
     description: str = Field(..., description="生成的商品描述详情")
     category: str = Field(..., description="生成的商品分类")
     search_keyword: str = Field("", description="搜同款用的简短核心商品词（模型未返回时为空）")
+    provider_used: str = Field(..., description="本次成功调用的服务商名称")
+
+
+class IdentifyItemResponse(BaseModel):
+    """拍照识物响应"""
+
+    name: str = Field(..., description="识别出的物品名称")
+    category: str = Field(..., description="物品分类")
+    description: str = Field(..., description="物品详细介绍")
+    search_keyword: str = Field("", description="搜同款用的简短核心商品词")
     provider_used: str = Field(..., description="本次成功调用的服务商名称")
 
 
@@ -564,23 +576,8 @@ async def reset_ai_prompts(
     return await _load_prompt_settings(session)
 
 
-@router.post("/generate-listing", response_model=GenerateListingResponse)
-async def generate_listing_endpoint(
-    request: Request,
-    _: User = Depends(get_current_admin_user),
-    session: AsyncSession = Depends(get_db_session),
-) -> dict[str, Any]:
-    """根据商品图片生成闲鱼发布标题、详情和分类（走容灾调度）
-
-    入参支持两种方式（二选一）：
-    1. multipart/form-data：通过 file 或 image 字段上传图片二进制文件；可选 hint 或 keywords 字段。
-    2. application/json：通过 image_base64 或 image 传入 base64 编码的图片；可选 hint 或 keywords 字段。
-
-    返回值：
-    - 200: {title, description, category, provider_used}
-    - 503: 未配置或未启用任何 AI 服务商
-    - 502: 所有服务商均调用失败，返回每条服务商的错误详情（不含 Key）
-    """
+async def _extract_image_and_hint(request: Request) -> tuple[bytes, Optional[str]]:
+    """从请求中解析图片二进制数据及可选的补充提示词（支持 multipart 与 json 两种格式）"""
     content_type = request.headers.get("content-type", "")
     image_bytes = b""
     user_hint: Optional[str] = None
@@ -639,9 +636,63 @@ async def generate_listing_endpoint(
     if not image_bytes:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="商品图片数据不能为空")
 
+    return image_bytes, user_hint
+
+
+@router.post("/generate-listing", response_model=GenerateListingResponse)
+async def generate_listing_endpoint(
+    request: Request,
+    _: User = Depends(get_current_admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    """根据商品图片生成闲鱼发布标题、详情和分类（走容灾调度）
+
+    入参支持两种方式（二选一）：
+    1. multipart/form-data：通过 file 或 image 字段上传图片二进制文件；可选 hint 或 keywords 字段。
+    2. application/json：通过 image_base64 或 image 传入 base64 编码的图片；可选 hint 或 keywords 字段。
+
+    返回值：
+    - 200: {title, description, category, provider_used}
+    - 503: 未配置或未启用任何 AI 服务商
+    - 502: 所有服务商均调用失败，返回每条服务商的错误详情（不含 Key）
+    """
+    image_bytes, user_hint = await _extract_image_and_hint(request)
+
     service = AiProviderFailoverService(session=session)
     try:
         result = await service.generate_listing(image_bytes=image_bytes, hint=user_hint)
+        return result
+    except NoProviderConfiguredError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+    except AllProvidersFailedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"message": str(exc), "errors": exc.errors},
+        )
+
+
+@router.post("/identify", response_model=IdentifyItemResponse)
+async def identify_item_endpoint(
+    request: Request,
+    _: User = Depends(get_current_admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    """根据商品图片识别物品名称、分类、介绍与搜索词（走容灾调度）
+
+    入参支持两种方式（二选一）：
+    1. multipart/form-data：通过 file 或 image 字段上传图片二进制文件；可选 hint 或 keywords 字段。
+    2. application/json：通过 image_base64 或 image 传入 base64 编码的图片；可选 hint 或 keywords 字段。
+
+    返回值：
+    - 200: {name, category, description, search_keyword, provider_used}
+    - 503: 未配置或未启用任何 AI 服务商
+    - 502: 所有服务商均调用失败，返回每条服务商的错误详情（不含 Key）
+    """
+    image_bytes, user_hint = await _extract_image_and_hint(request)
+
+    service = AiProviderFailoverService(session=session)
+    try:
+        result = await service.identify_item(image_bytes=image_bytes, hint=user_hint)
         return result
     except NoProviderConfiguredError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
