@@ -27,6 +27,10 @@ from app.services.ai_provider_crypto import (
 from app.services.ai_provider_failover_service import (
     AiProviderFailoverService,
     AllProvidersFailedError,
+    CHAT_SYSTEM_PROMPT,
+    IDENTIFY_PROMPT,
+    IDENTIFY_PROMPT_KEY,
+    ImageGenerationNotSupportedError,
     LISTING_PROMPT,
     LISTING_PROMPT_KEY,
     PICK_PROMPT,
@@ -113,6 +117,7 @@ class AiPromptsUpdateRequest(BaseModel):
 
     listing_prompt: Optional[str] = Field(None, description="发布文案生成提示词（发布第 2 步）")
     pick_prompt: Optional[str] = Field(None, description="挑同款定价提示词（发布第 4 步）")
+    identify_prompt: Optional[str] = Field(None, description="拍照识物提示词（拍照识物第 1 步）")
 
 
 class AiPromptsResponse(BaseModel):
@@ -120,9 +125,11 @@ class AiPromptsResponse(BaseModel):
 
     listing_prompt: str = Field(..., description="发布文案生成提示词")
     pick_prompt: str = Field(..., description="挑同款定价提示词")
+    identify_prompt: str = Field(..., description="拍照识物提示词")
     listing_is_default: bool = Field(..., description="发布文案提示词是否为默认提示词")
     pick_is_default: bool = Field(..., description="挑同款提示词是否为默认提示词")
-    updated_at: Optional[datetime] = Field(None, description="两条记录中较新的更新时间；未配置过时为空")
+    identify_is_default: bool = Field(..., description="拍照识物提示词是否为默认提示词")
+    updated_at: Optional[datetime] = Field(None, description="三条记录中较新的更新时间；未配置过时为空")
 
 
 class GenerateListingResponse(BaseModel):
@@ -135,6 +142,16 @@ class GenerateListingResponse(BaseModel):
     provider_used: str = Field(..., description="本次成功调用的服务商名称")
 
 
+class IdentifyItemResponse(BaseModel):
+    """拍照识物响应"""
+
+    name: str = Field(..., description="识别出的物品名称")
+    category: str = Field(..., description="物品分类")
+    description: str = Field(..., description="物品详细介绍")
+    search_keyword: str = Field("", description="搜同款用的简短核心商品词")
+    provider_used: str = Field(..., description="本次成功调用的服务商名称")
+
+
 class PickCompetitorResponse(BaseModel):
     """挑最相关同款并给建议价的响应"""
 
@@ -143,6 +160,20 @@ class PickCompetitorResponse(BaseModel):
     price: float = Field(..., description="挑中的同款价格")
     suggested_price: float = Field(..., description="以该同款价格为基准推断的建议价")
     reason: str = Field("", description="挑这一条的理由")
+    provider_used: str = Field(..., description="本次成功调用的服务商名称")
+
+
+class ChatResponse(BaseModel):
+    """多轮对话追问响应"""
+
+    reply: str = Field(..., description="助手回复内容")
+    provider_used: str = Field(..., description="本次成功调用的服务商名称")
+
+
+class GenerateImageResponse(BaseModel):
+    """AI 绘画生成响应"""
+
+    image_base64: str = Field(..., description="生成的图片 Base64 数据")
     provider_used: str = Field(..., description="本次成功调用的服务商名称")
 
 
@@ -199,10 +230,12 @@ def _serialize_provider(provider: AiProviderConfig, encryption_key: str) -> dict
 # 提示词在 xy_system_settings 中的描述（保存时写入 description，便于在设置表里辨认用途）
 LISTING_PROMPT_DESCRIPTION = "AI 发布文案生成提示词（发布第 2 步：生成标题/详情/分类/搜索词）"
 PICK_PROMPT_DESCRIPTION = "AI 挑同款定价提示词（发布第 4 步：挑最相关同款并推断建议价）"
+IDENTIFY_PROMPT_DESCRIPTION = "AI 拍照识物提示词（拍照识物：结构化识别物品名称/分类/介绍/搜索词）"
 
 # 校验要求：提示词必须提到模型输出 JSON 的字段名，否则模型输出无法解析
 LISTING_PROMPT_REQUIRED_WORDS = ("title", "description", "category", "search_keyword")
 PICK_PROMPT_REQUIRED_WORDS = ("index", "suggested_price", "reason")
+IDENTIFY_PROMPT_REQUIRED_WORDS = ("name", "category", "description", "search_keyword")
 
 
 def _validate_listing_prompt(value: str) -> None:
@@ -234,14 +267,29 @@ def _validate_pick_prompt(value: str) -> None:
         )
 
 
+def _validate_identify_prompt(value: str) -> None:
+    """校验拍照识物提示词：不能为空白，必须包含四个输出字段名"""
+    if not value or not value.strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="identify_prompt 不能为空")
+    missing = [word for word in IDENTIFY_PROMPT_REQUIRED_WORDS if word not in value]
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"identify_prompt 必须包含 {', '.join(missing)}（识别结果 JSON 的字段名），否则模型输出无法解析",
+        )
+
+
 async def _load_prompt_settings(session: AsyncSession) -> dict[str, Any]:
-    """读取两条提示词配置；未配置（行不存在或值为空）时返回代码里的默认常量。"""
+    """读取三条提示词配置；未配置（行不存在或值为空）时返回代码里的默认常量。"""
     result = await session.execute(
-        select(SystemSetting).where(SystemSetting.key.in_([LISTING_PROMPT_KEY, PICK_PROMPT_KEY]))
+        select(SystemSetting).where(
+            SystemSetting.key.in_([LISTING_PROMPT_KEY, PICK_PROMPT_KEY, IDENTIFY_PROMPT_KEY])
+        )
     )
     records = {record.key: record for record in result.scalars().all()}
     listing_row = records.get(LISTING_PROMPT_KEY)
     pick_row = records.get(PICK_PROMPT_KEY)
+    identify_row = records.get(IDENTIFY_PROMPT_KEY)
 
     listing_value = (
         listing_row.value
@@ -253,16 +301,23 @@ async def _load_prompt_settings(session: AsyncSession) -> dict[str, Any]:
         if pick_row and pick_row.value and pick_row.value.strip()
         else PICK_PROMPT
     )
+    identify_value = (
+        identify_row.value
+        if identify_row and identify_row.value and identify_row.value.strip()
+        else IDENTIFY_PROMPT
+    )
     updated_ats = [
         row.updated_at
-        for row in (listing_row, pick_row)
+        for row in (listing_row, pick_row, identify_row)
         if row is not None and row.updated_at is not None
     ]
     return {
         "listing_prompt": listing_value,
         "pick_prompt": pick_value,
+        "identify_prompt": identify_value,
         "listing_is_default": listing_value == LISTING_PROMPT,
         "pick_is_default": pick_value == PICK_PROMPT,
+        "identify_is_default": identify_value == IDENTIFY_PROMPT,
         "updated_at": max(updated_ats) if updated_ats else None,
     }
 
@@ -508,7 +563,7 @@ async def get_ai_prompts(
     _: User = Depends(get_current_admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
-    """获取两条 AI 提示词（未配置过时返回默认提示词 + is_default true）"""
+    """获取三条 AI 提示词（未配置过时返回默认提示词 + is_default true）"""
     return await _load_prompt_settings(session)
 
 
@@ -519,16 +574,22 @@ async def update_ai_prompts(
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     """更新 AI 提示词，只更新传了的字段；校验不过返回 400 且不保存。"""
-    if body.listing_prompt is None and body.pick_prompt is None:
+    if (
+        body.listing_prompt is None
+        and body.pick_prompt is None
+        and body.identify_prompt is None
+    ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="请至少提供 listing_prompt 或 pick_prompt 其中一个",
+            detail="请至少提供 listing_prompt、pick_prompt 或 identify_prompt 其中一个",
         )
     # 先全部校验通过再写入，任一字段不合法都不保存
     if body.listing_prompt is not None:
         _validate_listing_prompt(body.listing_prompt)
     if body.pick_prompt is not None:
         _validate_pick_prompt(body.pick_prompt)
+    if body.identify_prompt is not None:
+        _validate_identify_prompt(body.identify_prompt)
 
     try:
         if body.listing_prompt is not None:
@@ -538,6 +599,10 @@ async def update_ai_prompts(
         if body.pick_prompt is not None:
             await _upsert_prompt_setting(
                 session, PICK_PROMPT_KEY, body.pick_prompt, PICK_PROMPT_DESCRIPTION
+            )
+        if body.identify_prompt is not None:
+            await _upsert_prompt_setting(
+                session, IDENTIFY_PROMPT_KEY, body.identify_prompt, IDENTIFY_PROMPT_DESCRIPTION
             )
         await session.commit()
     except Exception as exc:
@@ -554,9 +619,11 @@ async def reset_ai_prompts(
     _: User = Depends(get_current_admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
-    """恢复默认：删除两条自定义提示词行，之后 GET 返回默认提示词 + is_default true。"""
+    """恢复默认：删除三条自定义提示词行，之后 GET 返回默认提示词 + is_default true。"""
     result = await session.execute(
-        select(SystemSetting).where(SystemSetting.key.in_([LISTING_PROMPT_KEY, PICK_PROMPT_KEY]))
+        select(SystemSetting).where(
+            SystemSetting.key.in_([LISTING_PROMPT_KEY, PICK_PROMPT_KEY, IDENTIFY_PROMPT_KEY])
+        )
     )
     for record in result.scalars().all():
         await session.delete(record)
@@ -564,23 +631,8 @@ async def reset_ai_prompts(
     return await _load_prompt_settings(session)
 
 
-@router.post("/generate-listing", response_model=GenerateListingResponse)
-async def generate_listing_endpoint(
-    request: Request,
-    _: User = Depends(get_current_admin_user),
-    session: AsyncSession = Depends(get_db_session),
-) -> dict[str, Any]:
-    """根据商品图片生成闲鱼发布标题、详情和分类（走容灾调度）
-
-    入参支持两种方式（二选一）：
-    1. multipart/form-data：通过 file 或 image 字段上传图片二进制文件；可选 hint 或 keywords 字段。
-    2. application/json：通过 image_base64 或 image 传入 base64 编码的图片；可选 hint 或 keywords 字段。
-
-    返回值：
-    - 200: {title, description, category, provider_used}
-    - 503: 未配置或未启用任何 AI 服务商
-    - 502: 所有服务商均调用失败，返回每条服务商的错误详情（不含 Key）
-    """
+async def _extract_image_and_hint(request: Request) -> tuple[bytes, Optional[str]]:
+    """从请求中解析图片二进制数据及可选的补充提示词（支持 multipart 与 json 两种格式）"""
     content_type = request.headers.get("content-type", "")
     image_bytes = b""
     user_hint: Optional[str] = None
@@ -639,9 +691,63 @@ async def generate_listing_endpoint(
     if not image_bytes:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="商品图片数据不能为空")
 
+    return image_bytes, user_hint
+
+
+@router.post("/generate-listing", response_model=GenerateListingResponse)
+async def generate_listing_endpoint(
+    request: Request,
+    _: User = Depends(get_current_admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    """根据商品图片生成闲鱼发布标题、详情和分类（走容灾调度）
+
+    入参支持两种方式（二选一）：
+    1. multipart/form-data：通过 file 或 image 字段上传图片二进制文件；可选 hint 或 keywords 字段。
+    2. application/json：通过 image_base64 或 image 传入 base64 编码的图片；可选 hint 或 keywords 字段。
+
+    返回值：
+    - 200: {title, description, category, provider_used}
+    - 503: 未配置或未启用任何 AI 服务商
+    - 502: 所有服务商均调用失败，返回每条服务商的错误详情（不含 Key）
+    """
+    image_bytes, user_hint = await _extract_image_and_hint(request)
+
     service = AiProviderFailoverService(session=session)
     try:
         result = await service.generate_listing(image_bytes=image_bytes, hint=user_hint)
+        return result
+    except NoProviderConfiguredError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+    except AllProvidersFailedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"message": str(exc), "errors": exc.errors},
+        )
+
+
+@router.post("/identify", response_model=IdentifyItemResponse)
+async def identify_item_endpoint(
+    request: Request,
+    _: User = Depends(get_current_admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    """根据商品图片识别物品名称、分类、介绍与搜索词（走容灾调度）
+
+    入参支持两种方式（二选一）：
+    1. multipart/form-data：通过 file 或 image 字段上传图片二进制文件；可选 hint 或 keywords 字段。
+    2. application/json：通过 image_base64 或 image 传入 base64 编码的图片；可选 hint 或 keywords 字段。
+
+    返回值：
+    - 200: {name, category, description, search_keyword, provider_used}
+    - 503: 未配置或未启用任何 AI 服务商
+    - 502: 所有服务商均调用失败，返回每条服务商的错误详情（不含 Key）
+    """
+    image_bytes, user_hint = await _extract_image_and_hint(request)
+
+    service = AiProviderFailoverService(session=session)
+    try:
+        result = await service.identify_item(image_bytes=image_bytes, hint=user_hint)
         return result
     except NoProviderConfiguredError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
@@ -725,3 +831,116 @@ async def pick_competitor_endpoint(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail={"message": str(exc), "errors": exc.errors},
         )
+
+
+@router.post("/chat", response_model=ChatResponse)
+async def chat_endpoint(
+    request: Request,
+    _: User = Depends(get_current_admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    """多轮对话追问（走容灾调度）
+
+    入参 application/json：
+    - messages: 对话历史消息列表，每项为 {"role": "user"|"assistant", "content": ...}。
+      第一条可含 OpenAI vision 格式的多模态内容列表，后续为文字追问。
+
+    返回值：
+    - 200: {reply, provider_used}
+    - 400: 入参不合法或格式错误
+    - 503: 未配置或未启用任何 AI 服务商
+    - 502: 所有服务商均调用失败
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="无效的 JSON 请求体")
+
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="无效的 JSON 请求体")
+
+    raw_messages = body.get("messages")
+    if not isinstance(raw_messages, list) or not raw_messages:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="messages 不能为空且必须为列表")
+
+    for idx, item in enumerate(raw_messages):
+        if not isinstance(item, dict):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"messages[{idx}] 必须为对象")
+        role = item.get("role")
+        if role not in ("user", "assistant"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"messages[{idx}].role 必须为 user 或 assistant",
+            )
+        content = item.get("content")
+        if content is None:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"messages[{idx}].content 不能为空")
+        if isinstance(content, str) and not content.strip():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"messages[{idx}].content 不能为空字符串")
+        if isinstance(content, list) and len(content) == 0:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"messages[{idx}].content 列表不能为空")
+        if not isinstance(content, (str, list)):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"messages[{idx}].content 格式不合法")
+
+    service = AiProviderFailoverService(session=session)
+    try:
+        result = await service.chat(messages=raw_messages)
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except NoProviderConfiguredError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+    except AllProvidersFailedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"message": str(exc), "errors": exc.errors},
+        )
+
+
+@router.post("/images/generate", response_model=GenerateImageResponse)
+async def generate_image_endpoint(
+    request: Request,
+    _: User = Depends(get_current_admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    """根据画面描述生成图片（走容灾调度）
+
+    入参 application/json：
+    - prompt: 用户输入的画面描述原文（不能为空或非字符串）。
+
+    返回值：
+    - 200: {image_base64, provider_used}
+    - 400: prompt 为空或格式错误
+    - 503: 未配置或未启用任何 AI 服务商
+    - 502: 服务商不支持图片生成或所有服务商均调用失败
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="无效的 JSON 请求体")
+
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="无效的 JSON 请求体")
+
+    prompt = body.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="prompt 不能为空且必须为字符串")
+
+    service = AiProviderFailoverService(session=session)
+    try:
+        result = await service.generate_image(prompt=prompt.strip())
+        return result
+    except ImageGenerationNotSupportedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=exc.message,
+        )
+    except NoProviderConfiguredError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+    except AllProvidersFailedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"message": str(exc), "errors": exc.errors},
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))

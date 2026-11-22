@@ -2,9 +2,10 @@
  * AI 提示词管理页面
  *
  * 功能：
- * 1. 两条提示词分别说明用途并可编辑：
+ * 1. 三条提示词分别说明用途并可编辑：
  *    - 发布文案提示词：发布第 2 步自动生成标题 / 详情 / 分类 / 搜索词
  *    - 挑同款提示词：发布第 4 步挑最相关同款并推断建议价
+ *    - 拍照识物提示词：拍照识物第一步结构化识别物品名称 / 分类 / 介绍 / 搜索词
  * 2. 保存（只提交改过的字段）、恢复默认（二次确认）
  * 3. 显示最后修改时间与是否为默认提示词；保存失败显示后端返回的明确错误
  * 4. 页面上绝不展示任何 API Key
@@ -32,6 +33,7 @@ export function AIPrompts() {
   const [prompts, setPrompts] = useState<AiPrompts | null>(null)
   const [listingDraft, setListingDraft] = useState('')
   const [pickDraft, setPickDraft] = useState('')
+  const [identifyDraft, setIdentifyDraft] = useState('')
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [showResetConfirm, setShowResetConfirm] = useState(false)
@@ -41,6 +43,7 @@ export function AIPrompts() {
     setPrompts(data)
     setListingDraft(data.listing_prompt)
     setPickDraft(data.pick_prompt)
+    setIdentifyDraft(data.identify_prompt)
   }, [])
 
   const loadPrompts = useCallback(async () => {
@@ -62,15 +65,17 @@ export function AIPrompts() {
 
   const listingChanged = prompts !== null && listingDraft !== prompts.listing_prompt
   const pickChanged = prompts !== null && pickDraft !== prompts.pick_prompt
-  const hasChanges = listingChanged || pickChanged
+  const identifyChanged = prompts !== null && identifyDraft !== prompts.identify_prompt
+  const hasChanges = listingChanged || pickChanged || identifyChanged
 
   const handleSave = async () => {
     if (!prompts || !hasChanges) return
     setSaving(true)
     try {
-      const params: { listing_prompt?: string; pick_prompt?: string } = {}
+      const params: { listing_prompt?: string; pick_prompt?: string; identify_prompt?: string } = {}
       if (listingChanged) params.listing_prompt = listingDraft
       if (pickChanged) params.pick_prompt = pickDraft
+      if (identifyChanged) params.identify_prompt = identifyDraft
       const data = await updateAiPrompts(params)
       applyPrompts(data)
       addToast({ type: 'success', message: 'AI 提示词已保存，下一次 AI 调用即生效' })
@@ -101,7 +106,7 @@ export function AIPrompts() {
         <div>
           <h1 className="page-title">AI 提示词</h1>
           <p className="page-description">
-            两条提示词只在后端定义、保存后下一次 AI 调用即生效；修改前请确认模型输出的 JSON 字段名还在提示词里，否则发布流程无法解析模型返回。
+            三条提示词只在后端定义、保存后下一次 AI 调用即生效；修改前请确认模型输出的 JSON 字段名还在提示词里，否则发布流程无法解析模型返回。
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -143,6 +148,9 @@ export function AIPrompts() {
               </span>
               <span>
                 挑同款提示词：{prompts.pick_is_default ? '默认' : '已自定义'}
+              </span>
+              <span>
+                拍照识物提示词：{prompts.identify_is_default ? '默认' : '已自定义'}
               </span>
             </div>
 
@@ -196,8 +204,33 @@ export function AIPrompts() {
               />
             </div>
 
+            <div>
+              <div className="mb-2 flex items-center gap-2">
+                <MessageSquareText className="h-4 w-4 text-slate-500 dark:text-slate-400" />
+                <h2 className="text-sm font-medium text-slate-900 dark:text-slate-100">
+                  拍照识物提示词
+                </h2>
+                {!prompts.identify_is_default && (
+                  <span className="rounded bg-amber-100 px-1.5 py-0.5 text-xs text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
+                    已自定义
+                  </span>
+                )}
+              </div>
+              <p className="mb-2 text-xs text-slate-500 dark:text-slate-400">
+                用在拍照识物第一步：结构化识别物品名称、分类、介绍和搜同款比价的搜索词。必须包含
+                name、category、description、search_keyword 四个词，否则模型输出无法解析。
+              </p>
+              <textarea
+                className="input-ios min-h-64 font-mono text-xs leading-5"
+                rows={14}
+                value={identifyDraft}
+                onChange={(event) => setIdentifyDraft(event.target.value)}
+                placeholder="拍照识物提示词"
+              />
+            </div>
+
             <p className="text-xs text-slate-400 dark:text-slate-500">
-              提示：只保存改过的提示词；恢复默认会同时把两条提示词恢复为系统内置版本。
+              提示：只保存改过的提示词；恢复默认会同时把三条提示词恢复为系统内置版本。
             </p>
           </div>
         )}
@@ -209,7 +242,7 @@ export function AIPrompts() {
           title="恢复默认提示词"
           message={
             <span>
-              确定要把两条 AI 提示词都恢复为系统默认版本吗？自定义内容将被删除，不可恢复。
+              确定要把三条 AI 提示词都恢复为系统默认版本吗？自定义内容将被删除，不可恢复。
             </span>
           }
           type="danger"
