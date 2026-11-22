@@ -115,6 +115,7 @@ class AiPromptsUpdateRequest(BaseModel):
 
     listing_prompt: Optional[str] = Field(None, description="发布文案生成提示词（发布第 2 步）")
     pick_prompt: Optional[str] = Field(None, description="挑同款定价提示词（发布第 4 步）")
+    identify_prompt: Optional[str] = Field(None, description="拍照识物提示词（拍照识物第 1 步）")
 
 
 class AiPromptsResponse(BaseModel):
@@ -122,9 +123,11 @@ class AiPromptsResponse(BaseModel):
 
     listing_prompt: str = Field(..., description="发布文案生成提示词")
     pick_prompt: str = Field(..., description="挑同款定价提示词")
+    identify_prompt: str = Field(..., description="拍照识物提示词")
     listing_is_default: bool = Field(..., description="发布文案提示词是否为默认提示词")
     pick_is_default: bool = Field(..., description="挑同款提示词是否为默认提示词")
-    updated_at: Optional[datetime] = Field(None, description="两条记录中较新的更新时间；未配置过时为空")
+    identify_is_default: bool = Field(..., description="拍照识物提示词是否为默认提示词")
+    updated_at: Optional[datetime] = Field(None, description="三条记录中较新的更新时间；未配置过时为空")
 
 
 class GenerateListingResponse(BaseModel):
@@ -211,10 +214,12 @@ def _serialize_provider(provider: AiProviderConfig, encryption_key: str) -> dict
 # 提示词在 xy_system_settings 中的描述（保存时写入 description，便于在设置表里辨认用途）
 LISTING_PROMPT_DESCRIPTION = "AI 发布文案生成提示词（发布第 2 步：生成标题/详情/分类/搜索词）"
 PICK_PROMPT_DESCRIPTION = "AI 挑同款定价提示词（发布第 4 步：挑最相关同款并推断建议价）"
+IDENTIFY_PROMPT_DESCRIPTION = "AI 拍照识物提示词（拍照识物：结构化识别物品名称/分类/介绍/搜索词）"
 
 # 校验要求：提示词必须提到模型输出 JSON 的字段名，否则模型输出无法解析
 LISTING_PROMPT_REQUIRED_WORDS = ("title", "description", "category", "search_keyword")
 PICK_PROMPT_REQUIRED_WORDS = ("index", "suggested_price", "reason")
+IDENTIFY_PROMPT_REQUIRED_WORDS = ("name", "category", "description", "search_keyword")
 
 
 def _validate_listing_prompt(value: str) -> None:
@@ -246,14 +251,29 @@ def _validate_pick_prompt(value: str) -> None:
         )
 
 
+def _validate_identify_prompt(value: str) -> None:
+    """校验拍照识物提示词：不能为空白，必须包含四个输出字段名"""
+    if not value or not value.strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="identify_prompt 不能为空")
+    missing = [word for word in IDENTIFY_PROMPT_REQUIRED_WORDS if word not in value]
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"identify_prompt 必须包含 {', '.join(missing)}（识别结果 JSON 的字段名），否则模型输出无法解析",
+        )
+
+
 async def _load_prompt_settings(session: AsyncSession) -> dict[str, Any]:
-    """读取两条提示词配置；未配置（行不存在或值为空）时返回代码里的默认常量。"""
+    """读取三条提示词配置；未配置（行不存在或值为空）时返回代码里的默认常量。"""
     result = await session.execute(
-        select(SystemSetting).where(SystemSetting.key.in_([LISTING_PROMPT_KEY, PICK_PROMPT_KEY]))
+        select(SystemSetting).where(
+            SystemSetting.key.in_([LISTING_PROMPT_KEY, PICK_PROMPT_KEY, IDENTIFY_PROMPT_KEY])
+        )
     )
     records = {record.key: record for record in result.scalars().all()}
     listing_row = records.get(LISTING_PROMPT_KEY)
     pick_row = records.get(PICK_PROMPT_KEY)
+    identify_row = records.get(IDENTIFY_PROMPT_KEY)
 
     listing_value = (
         listing_row.value
@@ -265,16 +285,23 @@ async def _load_prompt_settings(session: AsyncSession) -> dict[str, Any]:
         if pick_row and pick_row.value and pick_row.value.strip()
         else PICK_PROMPT
     )
+    identify_value = (
+        identify_row.value
+        if identify_row and identify_row.value and identify_row.value.strip()
+        else IDENTIFY_PROMPT
+    )
     updated_ats = [
         row.updated_at
-        for row in (listing_row, pick_row)
+        for row in (listing_row, pick_row, identify_row)
         if row is not None and row.updated_at is not None
     ]
     return {
         "listing_prompt": listing_value,
         "pick_prompt": pick_value,
+        "identify_prompt": identify_value,
         "listing_is_default": listing_value == LISTING_PROMPT,
         "pick_is_default": pick_value == PICK_PROMPT,
+        "identify_is_default": identify_value == IDENTIFY_PROMPT,
         "updated_at": max(updated_ats) if updated_ats else None,
     }
 
@@ -520,7 +547,7 @@ async def get_ai_prompts(
     _: User = Depends(get_current_admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
-    """获取两条 AI 提示词（未配置过时返回默认提示词 + is_default true）"""
+    """获取三条 AI 提示词（未配置过时返回默认提示词 + is_default true）"""
     return await _load_prompt_settings(session)
 
 
@@ -531,16 +558,22 @@ async def update_ai_prompts(
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     """更新 AI 提示词，只更新传了的字段；校验不过返回 400 且不保存。"""
-    if body.listing_prompt is None and body.pick_prompt is None:
+    if (
+        body.listing_prompt is None
+        and body.pick_prompt is None
+        and body.identify_prompt is None
+    ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="请至少提供 listing_prompt 或 pick_prompt 其中一个",
+            detail="请至少提供 listing_prompt、pick_prompt 或 identify_prompt 其中一个",
         )
     # 先全部校验通过再写入，任一字段不合法都不保存
     if body.listing_prompt is not None:
         _validate_listing_prompt(body.listing_prompt)
     if body.pick_prompt is not None:
         _validate_pick_prompt(body.pick_prompt)
+    if body.identify_prompt is not None:
+        _validate_identify_prompt(body.identify_prompt)
 
     try:
         if body.listing_prompt is not None:
@@ -550,6 +583,10 @@ async def update_ai_prompts(
         if body.pick_prompt is not None:
             await _upsert_prompt_setting(
                 session, PICK_PROMPT_KEY, body.pick_prompt, PICK_PROMPT_DESCRIPTION
+            )
+        if body.identify_prompt is not None:
+            await _upsert_prompt_setting(
+                session, IDENTIFY_PROMPT_KEY, body.identify_prompt, IDENTIFY_PROMPT_DESCRIPTION
             )
         await session.commit()
     except Exception as exc:
@@ -566,9 +603,11 @@ async def reset_ai_prompts(
     _: User = Depends(get_current_admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
-    """恢复默认：删除两条自定义提示词行，之后 GET 返回默认提示词 + is_default true。"""
+    """恢复默认：删除三条自定义提示词行，之后 GET 返回默认提示词 + is_default true。"""
     result = await session.execute(
-        select(SystemSetting).where(SystemSetting.key.in_([LISTING_PROMPT_KEY, PICK_PROMPT_KEY]))
+        select(SystemSetting).where(
+            SystemSetting.key.in_([LISTING_PROMPT_KEY, PICK_PROMPT_KEY, IDENTIFY_PROMPT_KEY])
+        )
     )
     for record in result.scalars().all():
         await session.delete(record)
