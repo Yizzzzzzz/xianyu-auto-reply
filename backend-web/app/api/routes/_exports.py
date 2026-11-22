@@ -16,6 +16,7 @@ from . import (
     advertisements,
     ai,
     ai_listing,
+    ai_providers,
     announcements,
     auto_reply_logs,
     auth,
@@ -147,6 +148,7 @@ api_router.include_router(payment.router, tags=["支付管理"])  # 已定义pre
 # AI回复
 api_router.include_router(ai.router, prefix="/ai-reply-settings", tags=["AI回复"])
 api_router.include_router(ai.test_router, tags=["AI回复测试"])  # ai.py已定义prefix="/ai-reply-test"
+api_router.include_router(ai_providers.router, tags=["AI服务商配置"])
 
 # 消息和回复
 api_router.include_router(message.router, prefix="/messages", tags=["消息管理"])
