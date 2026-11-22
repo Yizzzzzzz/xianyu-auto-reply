@@ -38,6 +38,7 @@ from app.services.ai_provider_failover_service import (
     AllProvidersFailedError,
     NoProviderConfiguredError,
     _parse_listing_json,
+    _parse_pick_json,
 )
 from common.models.ai_provider_config import AiProviderConfig
 
@@ -378,6 +379,12 @@ class TestAiProviderFailover(unittest.IsolatedAsyncioTestCase):
         res_2 = _parse_listing_json(raw_2)
         self.assertEqual(res_2["title"], "机械键盘")
 
+        # 带 search_keyword：解析出简短搜索词；不带时为空串（调用方回退到标题）
+        raw_3 = {title: 二手红轴机械键盘, description: 九成新, category: 数码配件, search_keyword: 机械键盘}
+        res_3 = _parse_listing_json(raw_3)
+        self.assertEqual(res_3["search_keyword"], "机械键盘")
+        self.assertEqual(res_1["search_keyword"], "")
+
         # 缺少字段报错
         with self.assertRaises(ValueError):
             _parse_listing_json('{"category": "其他"}')
@@ -385,6 +392,25 @@ class TestAiProviderFailover(unittest.IsolatedAsyncioTestCase):
         # 非有效 JSON 报错
         with self.assertRaises(Exception):
             _parse_listing_json("这是一段纯文本回复，没有返回JSON")
+
+    def test_pick_json_parsing(self) -> None:
+        """测试挑最相关同款 JSON 的解析与越界/非法价格校验"""
+        from app.services.ai_provider_failover_service import _parse_pick_json
+
+        res = _parse_pick_json(
+            '{"index": 1, "suggested_price": 88.8, "reason": "同款同型号"}', 3
+        )
+        self.assertEqual(res["index"], 1)
+        self.assertEqual(res["suggested_price"], 88.8)
+        self.assertEqual(res["reason"], "同款同型号")
+
+        # index 越界、价格不大于 0、缺 index 都报错
+        with self.assertRaises(ValueError):
+            _parse_pick_json('{"index": 5, "suggested_price": 10}', 3)
+        with self.assertRaises(ValueError):
+            _parse_pick_json('{"index": 0, "suggested_price": 0}', 3)
+        with self.assertRaises(ValueError):
+            _parse_pick_json('{"suggested_price": 10}', 3)
 
     # ==================== 8. PUT 更新保持原 Key 规则 ====================
 

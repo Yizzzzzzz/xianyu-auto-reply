@@ -30,10 +30,25 @@ LISTING_PROMPT = """你是一个专业的闲鱼二手交易平台商品发布助
 1. title: 吸引人且写实的闲鱼商品标题（30字以内），包含品牌、品类和核心卖点，不虚构或夸大成色。
 2. description: 详细的商品描述（200-500字），包括外观成色、规格特征、使用感受、转手原因说明及交易提示，语气真诚生活化。
 3. category: 精确的商品分类名称（如：数码产品、手机数码、居家日用、服饰鞋包、运动户外等）。
+4. search_keyword: 用于在闲鱼搜同款比价的简短核心商品词（2-6 字，如“机械键盘”“三层收纳盒”），只写商品本身，不要成色、价格或整句标题。
 
 请直接以标准 JSON 格式输出，不要包含任何 markdown 代码块标记，格式如下：
-{"title": "...", "description": "...", "category": "..."}"""
+{"title": "...", "description": "...", "category": "...", "search_keyword": "..."}"""
 
+
+
+PICK_PROMPT = """你是一个专业的闲鱼二手交易平台定价助手。请仔细观察提供的商品图片，并从下面列出的同款在售商品中，挑出和图片里商品最相关的一条（同一款商品/型号、成色最接近；不要只看标题相似，要结合图片里的品牌、型号、外观判断）。
+
+候选同款（编号从 0 开始）：
+{candidates}
+
+要求：
+1. 只输出标准 JSON，不要 markdown 代码块标记，格式如下：
+{"index": 0, "suggested_price": 123.45, "reason": "..."}
+2. index 必须是上面列表里真实存在的编号。
+3. suggested_price 以挑中那条的价格为基准，结合成色差异可小幅调整，必须大于 0；不要凭空编一个和候选价格无关的数字。
+4. reason 用一句话说明为什么挑这一条（20 字以内）。
+"""
 
 class AiFailoverError(Exception):
     """AI 容灾服务基类异常"""
@@ -78,6 +93,8 @@ def _parse_listing_json(raw_text: str) -> dict[str, str]:
     title = str(data.get("title") or "").strip()
     description = str(data.get("description") or "").strip()
     category = str(data.get("category") or "其他").strip()
+    # 旧模型 / 旧版本可能不返回搜索词，缺失时为空串，由调用方回退到标题全文。
+    search_keyword = str(data.get("search_keyword") or "").strip()
 
     if not title:
         raise ValueError("返回 JSON 中缺少 title 字段")
@@ -88,6 +105,49 @@ def _parse_listing_json(raw_text: str) -> dict[str, str]:
         "title": title,
         "description": description,
         "category": category,
+        "search_keyword": search_keyword,
+    }
+
+
+
+def _parse_pick_json(raw_text: str, count: int) -> dict[str, object]:
+    """从模型返回文本中解析“挑最相关同款”JSON 对象"""
+    text = raw_text.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if len(lines) >= 2 and lines[0].startswith("```"):
+            if lines[-1].strip() == "```":
+                lines = lines[1:-1]
+            else:
+                lines = lines[1:]
+        text = "\n".join(lines).strip()
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        text = text[start : end + 1]
+
+    data = json.loads(text)
+    if not isinstance(data, dict):
+        raise ValueError("返回内容解析后不是有效的 JSON 字典")
+
+    index = data.get("index")
+    if isinstance(index, bool) or not isinstance(index, int):
+        raise ValueError("返回 JSON 中缺少有效的 index 字段")
+    if index < 0 or index >= count:
+        raise ValueError("返回的 index 超出候选同款范围")
+
+    try:
+        suggested_price = float(data.get("suggested_price"))
+    except (TypeError, ValueError):
+        raise ValueError("返回 JSON 中缺少有效的 suggested_price 字段")
+    if suggested_price <= 0:
+        raise ValueError("suggested_price 必须大于 0")
+
+    return {
+        "index": index,
+        "suggested_price": suggested_price,
+        "reason": str(data.get("reason") or "").strip(),
     }
 
 
@@ -247,6 +307,7 @@ class AiProviderFailoverService:
                     "title": listing["title"],
                     "description": listing["description"],
                     "category": listing["category"],
+                    "search_keyword": listing["search_keyword"],
                     "provider_used": provider.name,
                 }
 
@@ -266,6 +327,155 @@ class AiProviderFailoverService:
                 continue
 
         # 全部服务商均失败
+        raise AllProvidersFailedError(
+            message="所有 AI 服务商均调用失败",
+            errors=provider_errors,
+        )
+
+    async def pick_competitor(
+        self,
+        image_bytes: bytes,
+        competitors: list[dict[str, object]],
+    ) -> dict[str, object]:
+        """对照商品图片，从候选同款中挑最相关的一条并给出建议价（容灾轮询）
+
+        Args:
+            image_bytes: 商品主图二进制数据。
+            competitors: 候选同款，每项至少含 title（str）与 price（数字）。
+
+        Returns:
+            dict: {competitor_index, suggested_price, reason, provider_used}
+        """
+        if not image_bytes:
+            raise ValueError("商品图片不能为空")
+        if not competitors:
+            raise ValueError("候选同款不能为空")
+
+        stmt = (
+            select(AiProviderConfig)
+            .where(AiProviderConfig.is_enabled == True)
+            .order_by(AiProviderConfig.priority.asc(), AiProviderConfig.id.asc())
+        )
+        result = await self.session.execute(stmt)
+        providers = list(result.scalars().all())
+
+        if not providers:
+            raise NoProviderConfiguredError("未配置 AI 服务商，请先通过后端接口添加服务商")
+
+        candidates = "\n".join(
+            f"{i}. 标题：{c.get('title', '')} 价格：¥{c.get('price', '')}"
+            for i, c in enumerate(competitors)
+        )
+        prompt_text = PICK_PROMPT.replace("{candidates}", candidates)
+        base64_img = base64.b64encode(image_bytes).decode("utf-8")
+        provider_errors: List[str] = []
+
+        for provider in providers:
+            plain_key = ""
+            try:
+                plain_key = decrypt_api_key(provider.api_key, self._get_encryption_key())
+            except Exception as exc:
+                err_msg = f"解密 API Key 失败: {str(exc)}"
+                provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                await self.session.commit()
+                provider_errors.append(f"[{provider.name}] {err_msg}")
+                continue
+
+            url = build_openai_url(provider.base_url, "chat/completions")
+            payload = {
+                "model": provider.model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt_text},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{base64_img}"
+                                },
+                            },
+                        ],
+                    }
+                ],
+                "temperature": 0.3,
+                "max_tokens": 512,
+            }
+            headers = {
+                "Authorization": f"Bearer {plain_key}",
+                "Content-Type": "application/json",
+            }
+            timeout_sec = float(provider.timeout_seconds or 30)
+
+            try:
+                if self._http_client is not None:
+                    resp = await self._http_client.post(url, json=payload, headers=headers, timeout=timeout_sec)
+                else:
+                    async with _create_async_client(timeout=timeout_sec) as client:
+                        resp = await client.post(url, json=payload, headers=headers)
+
+                if not resp.is_success:
+                    err_summary = extract_response_error(resp)
+                    if plain_key and plain_key in err_summary:
+                        err_summary = err_summary.replace(plain_key, "****")
+                    err_msg = f"HTTP {resp.status_code}: {err_summary}"
+                    provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                    await self.session.commit()
+                    provider_errors.append(f"[{provider.name}] {err_msg}")
+                    continue
+
+                resp_data = resp.json()
+                choices = resp_data.get("choices")
+                if not choices or not isinstance(choices, list):
+                    err_msg = "返回数据中缺少 choices 字段"
+                    provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                    await self.session.commit()
+                    provider_errors.append(f"[{provider.name}] {err_msg}")
+                    continue
+
+                raw_content = choices[0].get("message", {}).get("content", "")
+                if not raw_content or not isinstance(raw_content, str):
+                    err_msg = "返回消息正文为空"
+                    provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                    await self.session.commit()
+                    provider_errors.append(f"[{provider.name}] {err_msg}")
+                    continue
+
+                try:
+                    pick = _parse_pick_json(raw_content, len(competitors))
+                except Exception as exc:
+                    err_msg = f"挑同款结果解析失败: {str(exc)}"
+                    provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                    await self.session.commit()
+                    provider_errors.append(f"[{provider.name}] {err_msg}")
+                    continue
+
+                provider.last_error = None
+                provider.last_used_at = datetime.now()
+                await self.session.commit()
+
+                return {
+                    "competitor_index": pick["index"],
+                    "suggested_price": pick["suggested_price"],
+                    "reason": pick["reason"],
+                    "provider_used": provider.name,
+                }
+
+            except httpx.TimeoutException:
+                err_msg = f"请求超时（{int(timeout_sec)}秒）"
+                provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                await self.session.commit()
+                provider_errors.append(f"[{provider.name}] {err_msg}")
+                continue
+            except Exception as exc:
+                err_msg = f"调用异常: {type(exc).__name__}: {str(exc)}"
+                if plain_key and plain_key in err_msg:
+                    err_msg = err_msg.replace(plain_key, "****")
+                provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                await self.session.commit()
+                provider_errors.append(f"[{provider.name}] {err_msg}")
+                continue
+
         raise AllProvidersFailedError(
             message="所有 AI 服务商均调用失败",
             errors=provider_errors,

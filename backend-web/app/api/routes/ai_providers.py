@@ -109,6 +109,18 @@ class GenerateListingResponse(BaseModel):
     title: str = Field(..., description="生成的商品标题")
     description: str = Field(..., description="生成的商品描述详情")
     category: str = Field(..., description="生成的商品分类")
+    search_keyword: str = Field("", description="搜同款用的简短核心商品词（模型未返回时为空）")
+    provider_used: str = Field(..., description="本次成功调用的服务商名称")
+
+
+class PickCompetitorResponse(BaseModel):
+    """挑最相关同款并给建议价的响应"""
+
+    competitor_index: int = Field(..., description="挑中的候选同款编号（从 0 开始）")
+    title: str = Field(..., description="挑中的同款标题")
+    price: float = Field(..., description="挑中的同款价格")
+    suggested_price: float = Field(..., description="以该同款价格为基准推断的建议价")
+    reason: str = Field("", description="挑这一条的理由")
     provider_used: str = Field(..., description="本次成功调用的服务商名称")
 
 
@@ -461,6 +473,81 @@ async def generate_listing_endpoint(
     try:
         result = await service.generate_listing(image_bytes=image_bytes, hint=user_hint)
         return result
+    except NoProviderConfiguredError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+    except AllProvidersFailedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"message": str(exc), "errors": exc.errors},
+        )
+
+
+@router.post("/pick-competitor", response_model=PickCompetitorResponse)
+async def pick_competitor_endpoint(
+    request: Request,
+    _: User = Depends(get_current_admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    """对照商品主图，从候选同款中挑最相关的一条并推断建议价（走容灾调度）
+
+    入参 application/json：
+    - image_base64 或 image：主图 base64（二选一，必须）
+    - competitors：候选同款列表，每项 {title, price}，至少 1 条
+
+    返回值：
+    - 200: {competitor_index, title, price, suggested_price, reason, provider_used}
+    - 400: 入参缺失或不合法；503: 未配置服务商；502: 所有服务商均调用失败
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="无效的 JSON 请求体")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="无效的 JSON 请求体")
+
+    b64_data = body.get("image_base64") or body.get("image") or ""
+    if not b64_data or not isinstance(b64_data, str):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="缺少有效的 image_base64 或 image 字段")
+    if "," in b64_data:
+        b64_data = b64_data.split(",", 1)[1]
+    try:
+        image_bytes = base64.b64decode(b64_data)
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="图片 Base64 解码失败")
+    if not image_bytes:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="商品图片数据不能为空")
+
+    raw_competitors = body.get("competitors")
+    if not isinstance(raw_competitors, list) or not raw_competitors:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="competitors 不能为空，至少提供 1 条同款")
+    competitors: list[dict[str, object]] = []
+    for item in raw_competitors:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        try:
+            price = float(item.get("price"))
+        except (TypeError, ValueError):
+            continue
+        if not title or price <= 0:
+            continue
+        competitors.append({"title": title, "price": price})
+    if not competitors:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="competitors 中没有标题与价格都有效的同款")
+
+    service = AiProviderFailoverService(session=session)
+    try:
+        result = await service.pick_competitor(image_bytes=image_bytes, competitors=competitors)
+        index = int(result["competitor_index"])
+        picked = competitors[index]
+        return {
+            "competitor_index": index,
+            "title": str(picked["title"]),
+            "price": float(picked["price"]),
+            "suggested_price": float(result["suggested_price"]),
+            "reason": str(result.get("reason") or ""),
+            "provider_used": str(result["provider_used"]),
+        }
     except NoProviderConfiguredError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
     except AllProvidersFailedError as exc:
