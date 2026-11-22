@@ -86,6 +86,7 @@ const routeTitles: Record<string, string> = {
   '/product-publish/scheduled': '定时发布',
   '/product-publish/addresses': '地址库',
   '/product-publish/logs': '发布日志',
+  '/product-publish/ai-prompts': 'AI 提示词',
   '/product-monitor/overview': '监控总览',
   '/product-monitor/listing': '商品监控',
   '/product-monitor/categories': '监控分类',

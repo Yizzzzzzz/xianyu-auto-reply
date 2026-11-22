@@ -25,6 +25,7 @@ import {
   MessageCircle,
   MessageSquare,
   MessageSquarePlus,
+  MessageSquareText,
   Package,
   PackageCheck,
   PackageSearch,
@@ -117,6 +118,7 @@ export const mainNavItems: NavEntry[] = [
       { key: 'product-publish-addresses', icon: MapPin, label: '地址库', path: '/product-publish/addresses' },
       { key: 'product-publish-logs', icon: ScrollText, label: '发布日志', path: '/product-publish/logs' },
       { key: 'product-publish-ai-providers', icon: Bot, label: 'AI 服务商', path: '/product-publish/ai-providers' },
+      { key: 'product-publish-ai-prompts', icon: MessageSquareText, label: 'AI 提示词', path: '/product-publish/ai-prompts' },
     ],
   },
   {
