@@ -41,7 +41,7 @@ class User(TimestampMixin, Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True, comment="用户ID")
     external_id: Mapped[str | None] = mapped_column(String(64), index=True, comment="外部ID")
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True, comment="用户名")
-    email: Mapped[str] = mapped_column(String(255), unique=True, index=True, comment="邮箱")
+    email: Mapped[str | None] = mapped_column(String(255), unique=True, index=True, nullable=True, comment="邮箱")
     phone: Mapped[str | None] = mapped_column(String(32), comment="手机号")
     password_hash: Mapped[str] = mapped_column(String(255), comment="密码哈希")
     status: Mapped[UserStatus] = mapped_column(

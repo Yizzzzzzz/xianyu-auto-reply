@@ -87,18 +87,31 @@ async def finish_login_attempt(attempt: LoginAttempt, *, success: bool) -> None:
     )
 
 
-async def check_registration_limit(ip: str | None, email: str) -> None:
-    """注册提交每次尝试都计数：同 IP 10 分钟 5 次、同邮箱 24 小时 1 次。"""
+async def check_registration_limit(
+    ip: str | None,
+    email: str | None = None,
+    *,
+    phone: str | None = None,
+) -> None:
+    """注册提交每次尝试都计数：同 IP 10 分钟 5 次；有邮箱时同邮箱 24 小时 1 次，无邮箱时同手机号 24 小时 1 次。"""
     ip_result = await check_sliding_window_limit(
         'auth:register:ip', ip or 'unknown', window_seconds=600, max_requests=5,
     )
-    email_result = await check_sliding_window_limit(
-        'auth:register:email', email.strip().casefold(), window_seconds=86400, max_requests=1,
-    )
     if not ip_result.allowed:
         raise AuthRateLimitRejected("当前 IP 注册次数过多，请10分钟后再试")
-    if not email_result.allowed:
-        raise AuthRateLimitRejected("该邮箱24小时内已尝试注册，请稍后再试")
+
+    if email:
+        email_result = await check_sliding_window_limit(
+            'auth:register:email', email.strip().casefold(), window_seconds=86400, max_requests=1,
+        )
+        if not email_result.allowed:
+            raise AuthRateLimitRejected("该邮箱24小时内已尝试注册，请稍后再试")
+    elif phone:
+        phone_result = await check_sliding_window_limit(
+            'auth:register:phone', phone.strip().casefold(), window_seconds=86400, max_requests=1,
+        )
+        if not phone_result.allowed:
+            raise AuthRateLimitRejected("该手机号24小时内已尝试注册，请稍后再试")
 
 
 async def check_email_code_limit(ip: str | None, email: str, purpose: str) -> None:

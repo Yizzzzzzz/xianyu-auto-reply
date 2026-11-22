@@ -76,11 +76,31 @@ class UserService:
 
 
 
-    async def get_by_email(self, email: str) -> Optional[User]:
+    async def get_by_email(self, email: Optional[str]) -> Optional[User]:
 
         """根据邮箱查询用户"""
 
+        if not email:
+
+            return None
+
         stmt = select(User).where(User.email == email)
+
+        result = await self.session.execute(stmt)
+
+        return result.scalar_one_or_none()
+
+
+
+    async def get_by_phone(self, phone: Optional[str]) -> Optional[User]:
+
+        """根据手机号查询用户"""
+
+        if not phone:
+
+            return None
+
+        stmt = select(User).where(User.phone == phone)
 
         result = await self.session.execute(stmt)
 

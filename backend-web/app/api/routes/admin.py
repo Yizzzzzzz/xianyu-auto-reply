@@ -171,9 +171,10 @@ async def create_user(
     if existing_user:
         return ApiResponse(success=False, message="用户名已存在")
 
-    existing_email = await user_service.get_by_email(payload.email)
-    if existing_email:
-        return ApiResponse(success=False, message="邮箱已存在")
+    if payload.email:
+        existing_email = await user_service.get_by_email(payload.email)
+        if existing_email:
+            return ApiResponse(success=False, message="邮箱已存在")
 
     try:
         user = await user_service.create_admin_user(payload)

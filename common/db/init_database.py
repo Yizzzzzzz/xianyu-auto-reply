@@ -528,7 +528,7 @@ class DatabaseInitializer:
                 id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '用户ID',
                 external_id VARCHAR(64) COMMENT '外部ID',
                 username VARCHAR(64) NOT NULL UNIQUE COMMENT '用户名',
-                email VARCHAR(255) NOT NULL UNIQUE COMMENT '邮箱',
+                email VARCHAR(255) DEFAULT NULL UNIQUE COMMENT '邮箱',
                 phone VARCHAR(32) COMMENT '手机号',
                 password_hash VARCHAR(255) NOT NULL COMMENT '密码哈希',
                 status ENUM('ACTIVE', 'INACTIVE', 'SUSPENDED', 'DELETED') DEFAULT 'ACTIVE' COMMENT '用户状态',
@@ -2622,6 +2622,24 @@ class DatabaseInitializer:
                     logger.info("✓ xy_users: account_limit 字段已调整为允许为空且默认值为空")
             except Exception as e:
                 logger.warning(f"✗ xy_users account_limit 字段迁移失败: {e}")
+
+            # xy_users: email 字段允许为空且默认值为空
+            try:
+                check_email = text("""
+                    SELECT IS_NULLABLE FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA = DATABASE()
+                    AND TABLE_NAME = 'xy_users'
+                    AND COLUMN_NAME = 'email'
+                """)
+                result = await conn.execute(check_email)
+                email_row = result.fetchone()
+                if email_row and email_row.IS_NULLABLE != 'YES':
+                    await conn.execute(text(
+                        "ALTER TABLE xy_users MODIFY COLUMN email VARCHAR(255) DEFAULT NULL COMMENT '邮箱'"
+                    ))
+                    logger.info("✓ xy_users: email 字段已调整为允许为空且默认值为空")
+            except Exception as e:
+                logger.warning(f"✗ xy_users email 字段迁移失败: {e}")
 
             # xy_advertisements: 将 status 枚举扩展为包含 'unpaid'
             try:

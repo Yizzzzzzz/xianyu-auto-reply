@@ -166,12 +166,13 @@ async def register_user(
     """
     # 注册尝试先计数；后缀或开关拒绝也占用额度，且不能消费旧验证码。
     try:
-        await check_registration_limit(get_client_ip(request), payload.email)
-        await enforce_email_domain(setting_service.session, payload.email)
+        await check_registration_limit(get_client_ip(request), payload.email, phone=payload.phone)
+        if payload.email:
+            await enforce_email_domain(setting_service.session, payload.email)
     except (EmailDomainRejected, AuthRateLimitRejected) as exc:
         return ApiResponse(success=False, code=exc.code, message=str(exc))
     except Exception as exc:
-        logger.opt(exception=exc).error("注册策略检查失败：email={}", payload.email)
+        logger.opt(exception=exc).error("注册策略检查失败：identity={}", payload.email or payload.phone)
         await rollback_session(setting_service.session, operation="注册策略检查")
         return ApiResponse(success=False, code=50001, message="注册校验暂不可用，请稍后重试")
 
@@ -193,18 +194,24 @@ async def register_user(
     elif payload.email:
         # 有邮箱但没有验证码
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请输入邮箱验证码")
-    
+
     # 检查用户名是否已存在
     existing = await user_service.get_by_username(payload.username)
     if existing:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="用户名已被注册")
-    
+
+    # 检查手机号是否已存在
+    if payload.phone:
+        existing_phone = await user_service.get_by_phone(payload.phone)
+        if existing_phone:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="手机号已被注册")
+
     # 检查邮箱是否已存在
     if payload.email:
         existing_email = await user_service.get_by_email(payload.email)
         if existing_email:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="邮箱已被注册")
-    
+
     await user_service.create(payload)
     return ApiResponse(success=True, message="注册成功")
 
