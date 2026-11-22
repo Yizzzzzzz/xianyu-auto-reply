@@ -2063,6 +2063,25 @@ class DatabaseInitializer:
                 INDEX idx_alti_task_status (task_id, status)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI铺货任务明细表';
         """,
+
+        # 55. AI服务商配置表
+        "xy_ai_provider_configs": """
+            CREATE TABLE IF NOT EXISTS xy_ai_provider_configs (
+                id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键ID',
+                name VARCHAR(80) NOT NULL COMMENT '服务商名称',
+                base_url VARCHAR(300) NOT NULL COMMENT '接口基础地址',
+                api_key TEXT NOT NULL COMMENT '接口密钥（Fernet密文）',
+                model VARCHAR(100) NOT NULL COMMENT '默认模型名称',
+                is_enabled TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否启用：1-启用，0-禁用',
+                priority INT NOT NULL DEFAULT 100 COMMENT '调用优先级（越小越先试）',
+                timeout_seconds INT NOT NULL DEFAULT 30 COMMENT '单次调用超时时间（秒）',
+                last_error VARCHAR(1000) DEFAULT NULL COMMENT '最近一次失败错误摘要',
+                last_used_at DATETIME DEFAULT NULL COMMENT '最近一次成功调用时间',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+                INDEX idx_aipc_enabled_priority (is_enabled, priority)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI服务商配置表';
+        """,
     }
     
     # 字段迁移定义：表名 -> [(字段名, 字段定义, 在哪个字段后面)]

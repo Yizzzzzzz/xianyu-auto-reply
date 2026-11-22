@@ -52,6 +52,9 @@ class BackendWebConfig(BaseConfig):
     jwt_algorithm: str = Field(default="HS256")
     access_token_expire_minutes: int = Field(default=1440)
     refresh_token_expire_minutes: int = Field(default=60 * 24 * 7)
+
+    # AI服务商密钥对称加密密钥（Fernet）
+    ai_provider_encryption_key: str = Field(default="", alias="AI_PROVIDER_ENCRYPTION_KEY", repr=False)
     
     # CORS配置
     cors_origins_raw: str = Field(default="*", alias="CORS_ORIGINS")
