@@ -8,10 +8,11 @@ API Key 入库前采用 Fernet 对称加密，出库时均脱敏掩码，绝不�
 from __future__ import annotations
 
 from datetime import datetime
+import base64
 from typing import Any, List, Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,6 +23,11 @@ from app.services.ai_provider_crypto import (
     decrypt_api_key,
     encrypt_api_key,
     mask_api_key,
+)
+from app.services.ai_provider_failover_service import (
+    AiProviderFailoverService,
+    AllProvidersFailedError,
+    NoProviderConfiguredError,
 )
 from common.models.ai_provider_config import AiProviderConfig
 from common.models.user import User
@@ -95,6 +101,15 @@ class AiProviderTestResponse(BaseModel):
     ok: bool
     status: int
     message: str
+
+
+class GenerateListingResponse(BaseModel):
+    """生成商品文案响应"""
+
+    title: str = Field(..., description="生成的商品标题")
+    description: str = Field(..., description="生成的商品描述详情")
+    category: str = Field(..., description="生成的商品分类")
+    provider_used: str = Field(..., description="本次成功调用的服务商名称")
 
 
 # ==================== 辅助函数 ====================
@@ -357,3 +372,91 @@ async def delete_provider(
     await session.delete(provider)
     await session.commit()
     return {"ok": True, "message": "服务商配置已删除"}
+
+
+@router.post("/generate-listing", response_model=GenerateListingResponse)
+async def generate_listing_endpoint(
+    request: Request,
+    _: User = Depends(get_current_admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    """根据商品图片生成闲鱼发布标题、详情和分类（走容灾调度）
+
+    入参支持两种方式（二选一）：
+    1. multipart/form-data：通过 file 或 image 字段上传图片二进制文件；可选 hint 或 keywords 字段。
+    2. application/json：通过 image_base64 或 image 传入 base64 编码的图片；可选 hint 或 keywords 字段。
+
+    返回值：
+    - 200: {title, description, category, provider_used}
+    - 503: 未配置或未启用任何 AI 服务商
+    - 502: 所有服务商均调用失败，返回每条服务商的错误详情（不含 Key）
+    """
+    content_type = request.headers.get("content-type", "")
+    image_bytes = b""
+    user_hint: Optional[str] = None
+
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        uploaded_file = form.get("file") or form.get("image")
+        if not uploaded_file:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="未检测到上传的图片文件（请使用 file 或 image 字段）",
+            )
+        if hasattr(uploaded_file, "read"):
+            image_bytes = await uploaded_file.read()
+        raw_hint = form.get("hint") or form.get("keywords")
+        if raw_hint and isinstance(raw_hint, str):
+            user_hint = raw_hint.strip()
+
+    elif "application/json" in content_type:
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="无效的 JSON 请求体")
+        b64_data = body.get("image_base64") or body.get("image") or ""
+        if not b64_data or not isinstance(b64_data, str):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="缺少有效的 image_base64 或 image 字段")
+        if "," in b64_data:
+            b64_data = b64_data.split(",", 1)[1]
+        try:
+            image_bytes = base64.b64decode(b64_data)
+        except Exception:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="图片 Base64 解码失败")
+        raw_hint = body.get("hint") or body.get("keywords")
+        if raw_hint and isinstance(raw_hint, str):
+            user_hint = raw_hint.strip()
+
+    else:
+        # 兼容未显式设置 Content-Type 的表单提交
+        try:
+            form = await request.form()
+            uploaded_file = form.get("file") or form.get("image")
+            if uploaded_file and hasattr(uploaded_file, "read"):
+                image_bytes = await uploaded_file.read()
+                raw_hint = form.get("hint") or form.get("keywords")
+                if raw_hint and isinstance(raw_hint, str):
+                    user_hint = raw_hint.strip()
+        except Exception:
+            pass
+
+        if not image_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="请通过 multipart/form-data（上传文件）或 application/json（base64）提交商品图片",
+            )
+
+    if not image_bytes:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="商品图片数据不能为空")
+
+    service = AiProviderFailoverService(session=session)
+    try:
+        result = await service.generate_listing(image_bytes=image_bytes, hint=user_hint)
+        return result
+    except NoProviderConfiguredError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+    except AllProvidersFailedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"message": str(exc), "errors": exc.errors},
+        )
