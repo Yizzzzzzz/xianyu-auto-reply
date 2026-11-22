@@ -77,17 +77,11 @@ class UserService:
 
 
     async def get_by_email(self, email: Optional[str]) -> Optional[User]:
-
-        """根据邮箱查询用户"""
-
-        if not email:
-
+        """根据邮箱查询用户（大小写不敏感）"""
+        if not email or not email.strip():
             return None
-
-        stmt = select(User).where(User.email == email)
-
+        stmt = select(User).where(func.lower(User.email) == email.strip().lower())
         result = await self.session.execute(stmt)
-
         return result.scalar_one_or_none()
 
 
@@ -217,27 +211,17 @@ class UserService:
 
 
     async def create(self, payload: UserCreate, *, role: UserRole | None = None) -> User:
-
         # 注册时按系统设置的默认天数计算到期日（未配置则为 None，表示永不过期）
-
         expire_at = await self._calc_register_expire_at()
-
+        email = payload.email.strip().lower() if payload.email else None
         user = User(
-
             username=payload.username,
-
-            email=payload.email,
-
+            email=email,
             phone=payload.phone,
-
             password_hash=security.get_password_hash(payload.password),
-
             role=role or UserRole.MEMBER,
-
             status=UserStatus.ACTIVE,
-
             expire_at=expire_at,
-
         )
 
         self.session.add(user)
