@@ -1,12 +1,11 @@
 import { useState, useEffect } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
-import { MessageSquare, User, Lock, Mail, KeyRound, Eye, EyeOff } from 'lucide-react'
+import { MessageSquare, User, Lock, Mail, Phone, Eye, EyeOff } from 'lucide-react'
 import { AuthNavbar } from '@/components/common/AuthNavbar'
 import { SafeHtml } from '@/components/common/SafeHtml'
 import { getDefaultAuthFooterAdSettings } from '@/api/settings'
-import { register, generateCaptcha, verifyCaptcha, sendVerificationCode, getAuthFooterAdSettings } from '@/api/auth'
+import { register, getAuthFooterAdSettings } from '@/api/auth'
 import { useUIStore } from '@/store/uiStore'
-import { cn } from '@/utils/cn'
 import { ButtonLoading } from '@/components/common/Loading'
 import { RegistrationGate } from './RegistrationGate'
 import { useRegistrationStatus } from './useRegistrationStatus'
@@ -22,18 +21,10 @@ export function Register() {
 
   // Form states
   const [username, setUsername] = useState('')
+  const [phone, setPhone] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
-  const [captchaCode, setCaptchaCode] = useState('')
-  const [verificationCode, setVerificationCode] = useState('')
-
-  // Captcha states
-  const [captchaImage, setCaptchaImage] = useState('')
-  const [sessionId] = useState(() => `session_${Math.random().toString(36).substr(2, 9)}_${Date.now()}`)
-  const [captchaVerified, setCaptchaVerified] = useState(false)
-  const [countdown, setCountdown] = useState(0)
-  const [verifying, setVerifying] = useState(false)
 
   useEffect(() => {
     getAuthFooterAdSettings()
@@ -48,123 +39,46 @@ export function Register() {
     return () => clearTimeout(timer)
   }, [registrationEnabled, navigate, addToast])
 
-  useEffect(() => {
-    if (registrationEnabled === true) loadCaptcha()
-  }, [registrationEnabled])
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
 
-  useEffect(() => {
-    if (countdown > 0) {
-      const timer = setTimeout(() => setCountdown(countdown - 1), 1000)
-      return () => clearTimeout(timer)
-    }
-  }, [countdown])
+    const trimmedUsername = username.trim()
+    const trimmedPhone = phone.trim()
+    const trimmedEmail = email.trim()
 
-  // 自动验证图形验证码
-  useEffect(() => {
-    if (captchaCode.length === 4 && !captchaVerified && !verifying) {
-      handleVerifyCaptchaAuto()
-    }
-  }, [captchaCode])
-
-  const handleVerifyCaptchaAuto = async () => {
-    if (captchaCode.length !== 4 || verifying) return
-    setVerifying(true)
-    try {
-      const result = await verifyCaptcha(sessionId, captchaCode)
-      if (result.success) {
-        setCaptchaVerified(true)
-        addToast({ type: 'success', message: '验证码验证成功' })
-      } else {
-        setCaptchaVerified(false)
-        loadCaptcha()
-        addToast({ type: 'error', message: '验证码错误' })
-      }
-    } catch {
-      addToast({ type: 'error', message: '验证失败' })
-    } finally {
-      setVerifying(false)
-    }
-  }
-
-  const loadCaptcha = async () => {
-    try {
-      const result = await generateCaptcha(sessionId)
-      if (result.success && result.captcha_image) {
-        setCaptchaImage(result.captcha_image)
-        setCaptchaVerified(false)
-        setCaptchaCode('')
-      }
-    } catch {
-      addToast({ type: 'error', message: '加载验证码失败' })
-    }
-  }
-
-  const handleSendCode = async () => {
-    // 验证表单数据
-    if (!username.trim()) {
-      addToast({ type: 'warning', message: '请先输入用户名' })
+    if (!trimmedUsername) {
+      addToast({ type: 'warning', message: '请输入用户名' })
       return
     }
-    if (!email.trim()) {
-      addToast({ type: 'warning', message: '请先输入邮箱地址' })
+
+    if (trimmedPhone && !/^1[3-9]\d{9}$/.test(trimmedPhone)) {
+      addToast({ type: 'warning', message: '请输入正确的手机号格式' })
       return
     }
-    // 验证邮箱格式
+
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
-    if (!emailRegex.test(email)) {
+    if (trimmedEmail && !emailRegex.test(trimmedEmail)) {
       addToast({ type: 'warning', message: '请输入正确的邮箱格式' })
       return
     }
+
     if (!password) {
-      addToast({ type: 'warning', message: '请先输入密码' })
+      addToast({ type: 'warning', message: '请输入密码' })
       return
     }
+
     if (password.length < 6) {
       addToast({ type: 'warning', message: '密码长度至少6位' })
       return
     }
+
     if (!confirmPassword) {
-      addToast({ type: 'warning', message: '请先确认密码' })
+      addToast({ type: 'warning', message: '请确认密码' })
       return
     }
+
     if (password !== confirmPassword) {
       addToast({ type: 'warning', message: '两次输入的密码不一致' })
-      return
-    }
-    if (!captchaVerified) {
-      addToast({ type: 'warning', message: '请先完成图形验证码验证' })
-      return
-    }
-    if (countdown > 0) return
-
-    try {
-      const result = await sendVerificationCode(email, 'register', sessionId)
-      if (result.success) {
-        setCountdown(60)
-        addToast({ type: 'success', message: '验证码已发送' })
-      } else {
-        addToast({ type: 'error', message: result.message || '发送失败' })
-      }
-    } catch {
-      addToast({ type: 'error', message: '发送验证码失败' })
-    }
-  }
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-
-    if (!username || !email || !password || !confirmPassword || !verificationCode) {
-      addToast({ type: 'error', message: '请填写所有必填项' })
-      return
-    }
-
-    if (password !== confirmPassword) {
-      addToast({ type: 'error', message: '两次输入的密码不一致' })
-      return
-    }
-
-    if (password.length < 6) {
-      addToast({ type: 'error', message: '密码长度至少6位' })
       return
     }
 
@@ -172,11 +86,10 @@ export function Register() {
 
     try {
       const result = await register({
-        username,
-        email,
+        username: trimmedUsername,
+        phone: trimmedPhone || undefined,
+        email: trimmedEmail || undefined,
         password,
-        verification_code: verificationCode,
-        session_id: sessionId,
       })
 
       if (result.success) {
@@ -248,9 +161,24 @@ export function Register() {
               </div>
             </div>
 
+            {/* Phone */}
+            <div className="input-group">
+              <label className="input-label">手机号 <span className="text-xs text-slate-400 font-normal">（可选）</span></label>
+              <div className="relative">
+                <Phone className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                <input
+                  type="tel"
+                  value={phone}
+                  onChange={(e) => setPhone(e.target.value)}
+                  placeholder="请输入手机号"
+                  className="input-ios pl-9"
+                />
+              </div>
+            </div>
+
             {/* Email */}
             <div className="input-group">
-              <label className="input-label">邮箱地址</label>
+              <label className="input-label">邮箱地址 <span className="text-xs text-slate-400 font-normal">（可选）</span></label>
               <div className="relative">
                 <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                 <input
@@ -297,60 +225,6 @@ export function Register() {
                   placeholder="请再次输入密码"
                   className="input-ios pl-9"
                 />
-              </div>
-            </div>
-
-            {/* Captcha */}
-            <div className="input-group">
-              <label className="input-label">图形验证码</label>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={captchaCode}
-                  onChange={(e) => setCaptchaCode(e.target.value)}
-                  placeholder="输入验证码"
-                  maxLength={4}
-                  className="input-ios flex-1"
-                  disabled={captchaVerified}
-                />
-                <img
-                  src={captchaImage}
-                  alt="验证码"
-                  onClick={loadCaptcha}
-                  className="h-[38px] rounded border border-slate-300 dark:border-slate-600 cursor-pointer hover:opacity-80 transition-opacity"
-                />
-              </div>
-              <p className={cn(
-                'text-xs',
-                captchaVerified ? 'text-green-600 dark:text-green-400' : verifying ? 'text-blue-500' : 'text-slate-400'
-              )}>
-                {captchaVerified ? '✓ 验证成功' : verifying ? '验证中...' : '点击图片更换验证码'}
-              </p>
-            </div>
-
-            {/* Email code */}
-            <div className="input-group">
-              <label className="input-label">邮箱验证码</label>
-              <div className="flex gap-2">
-                <div className="relative flex-1">
-                  <KeyRound className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                  <input
-                    type="text"
-                    value={verificationCode}
-                    onChange={(e) => setVerificationCode(e.target.value)}
-                    placeholder="6位数字验证码"
-                    maxLength={6}
-                    className="input-ios pl-9"
-                  />
-                </div>
-                <button
-                  type="button"
-                  onClick={handleSendCode}
-                  disabled={!captchaVerified || !email || countdown > 0}
-                  className="btn-ios-secondary whitespace-nowrap"
-                >
-                  {countdown > 0 ? `${countdown}s` : '发送'}
-                </button>
               </div>
             </div>
 
