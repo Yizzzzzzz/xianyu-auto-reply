@@ -271,7 +271,7 @@ class AiProviderFailoverService:
                     }
                 ],
                 "temperature": 0.7,
-                "max_tokens": 1024,
+                "max_tokens": 4096,
             }
             headers = {
                 "Authorization": f"Bearer {plain_key}",
@@ -308,7 +308,8 @@ class AiProviderFailoverService:
 
                 raw_content = choices[0].get("message", {}).get("content", "")
                 if not raw_content or not isinstance(raw_content, str):
-                    err_msg = "返回消息正文为空"
+                    _fr = choices[0].get("finish_reason") or ""
+                    err_msg = "返回消息正文为空" + (f"（finish_reason={_fr}，若为 length 说明输出 token 上限被模型思考过程占满）" if _fr else "")
                     provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
                     await self.session.commit()
                     provider_errors.append(f"[{provider.name}] {err_msg}")
@@ -419,7 +420,7 @@ class AiProviderFailoverService:
                     }
                 ],
                 "temperature": 0.3,
-                "max_tokens": 512,
+                "max_tokens": 2048,
             }
             headers = {
                 "Authorization": f"Bearer {plain_key}",
@@ -455,7 +456,8 @@ class AiProviderFailoverService:
 
                 raw_content = choices[0].get("message", {}).get("content", "")
                 if not raw_content or not isinstance(raw_content, str):
-                    err_msg = "返回消息正文为空"
+                    _fr = choices[0].get("finish_reason") or ""
+                    err_msg = "返回消息正文为空" + (f"（finish_reason={_fr}，若为 length 说明输出 token 上限被模型思考过程占满）" if _fr else "")
                     provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
                     await self.session.commit()
                     provider_errors.append(f"[{provider.name}] {err_msg}")
