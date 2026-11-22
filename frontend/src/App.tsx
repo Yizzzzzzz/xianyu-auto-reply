@@ -71,6 +71,7 @@ const BatchPublish = React.lazy(() => import('@/pages/product-publish/BatchPubli
 const ScheduledPublishRules = React.lazy(() => import('@/pages/product-publish/ScheduledPublishRules').then(m => ({ default: m.ScheduledPublishRules })))
 const PublishAddresses = React.lazy(() => import('@/pages/product-publish/PublishAddresses').then(m => ({ default: m.PublishAddresses })))
 const PublishLogs = React.lazy(() => import('@/pages/product-publish/PublishLogs').then(m => ({ default: m.PublishLogs })))
+const AIProviders = React.lazy(() => import('@/pages/product-publish/AIProviders').then(m => ({ default: m.AIProviders })))
 const ListingMonitor = React.lazy(() => import('@/pages/product-monitor/ListingMonitor').then(m => ({ default: m.ListingMonitor })))
 const MonitorOverview = React.lazy(() => import('@/pages/product-monitor/MonitorOverview').then(m => ({ default: m.MonitorOverview })))
 const MonitorCategory = React.lazy(() => import('@/pages/product-monitor/MonitorCategory').then(m => ({ default: m.MonitorCategory })))
@@ -381,6 +382,7 @@ function App() {
             <Route path="product-publish/scheduled" element={<ScheduledPublishRules />} />
             <Route path="product-publish/addresses" element={<PublishAddresses />} />
             <Route path="product-publish/logs" element={<PublishLogs />} />
+            <Route path="product-publish/ai-providers" element={<AIProviders />} />
             {/* 商品监控 */}
             <Route path="product-monitor/overview" element={<MonitorOverview />} />
             <Route path="product-monitor/categories" element={<MonitorCategory />} />

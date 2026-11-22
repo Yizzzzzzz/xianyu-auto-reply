@@ -6,6 +6,7 @@ import {
   Bell,
   BellOff,
   BookOpen,
+  Bot,
   Database,
   FileText,
   Filter,
@@ -115,6 +116,7 @@ export const mainNavItems: NavEntry[] = [
       { key: 'product-publish-scheduled', icon: Timer, label: '定时发布', path: '/product-publish/scheduled' },
       { key: 'product-publish-addresses', icon: MapPin, label: '地址库', path: '/product-publish/addresses' },
       { key: 'product-publish-logs', icon: ScrollText, label: '发布日志', path: '/product-publish/logs' },
+      { key: 'product-publish-ai-providers', icon: Bot, label: 'AI 服务商', path: '/product-publish/ai-providers' },
     ],
   },
   {
