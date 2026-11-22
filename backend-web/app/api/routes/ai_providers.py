@@ -115,6 +115,14 @@ class GenerateListingResponse(BaseModel):
 # ==================== 辅助函数 ====================
 
 
+def _create_async_client(timeout: float) -> httpx.AsyncClient:
+    """创建异步 HTTP 客户端，在代理环境变量格式不兼容时自动降级"""
+    try:
+        return httpx.AsyncClient(timeout=timeout)
+    except Exception:
+        return httpx.AsyncClient(timeout=timeout, trust_env=False)
+
+
 def _get_encryption_key() -> str:
     """获取对称加密密钥，缺失时抛出明确异常"""
     key = settings.ai_provider_encryption_key
@@ -274,7 +282,7 @@ async def test_provider_connection(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with _create_async_client(timeout=10.0) as client:
             resp = await client.get(url, headers=headers)
             if resp.is_success:
                 return {"ok": True, "status": resp.status_code, "message": "服务商连接测试成功"}

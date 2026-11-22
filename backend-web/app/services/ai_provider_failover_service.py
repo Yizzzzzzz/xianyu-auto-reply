@@ -91,6 +91,14 @@ def _parse_listing_json(raw_text: str) -> dict[str, str]:
     }
 
 
+def _create_async_client(timeout: float) -> httpx.AsyncClient:
+    """创建异步 HTTP 客户端，在代理环境变量格式不兼容时自动降级"""
+    try:
+        return httpx.AsyncClient(timeout=timeout)
+    except Exception:
+        return httpx.AsyncClient(timeout=timeout, trust_env=False)
+
+
 class AiProviderFailoverService:
     """AI 服务商容灾调用服务类"""
 
@@ -198,7 +206,7 @@ class AiProviderFailoverService:
                 if self._http_client is not None:
                     resp = await self._http_client.post(url, json=payload, headers=headers, timeout=timeout_sec)
                 else:
-                    async with httpx.AsyncClient(timeout=timeout_sec) as client:
+                    async with _create_async_client(timeout=timeout_sec) as client:
                         resp = await client.post(url, json=payload, headers=headers)
 
                 if not resp.is_success:

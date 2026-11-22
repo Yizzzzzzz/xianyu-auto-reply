@@ -24,7 +24,12 @@ class AiProviderConfig(TimestampMixin, Base):
         Index("idx_aipc_enabled_priority", "is_enabled", "priority"),
     )
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True, comment="主键ID")
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+        comment="主键ID",
+    )
     name: Mapped[str] = mapped_column(String(80), nullable=False, comment="服务商名称")
     base_url: Mapped[str] = mapped_column(String(300), nullable=False, comment="接口基础地址")
     api_key: Mapped[str] = mapped_column(Text, nullable=False, comment="接口密钥（Fernet密文）")
