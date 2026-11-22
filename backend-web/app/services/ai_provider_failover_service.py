@@ -153,7 +153,7 @@ class AiProviderFailoverService:
         providers = list(result.scalars().all())
 
         if not providers:
-            raise NoProviderConfiguredError("未配置 AI 服务商，请先在设置中添加")
+            raise NoProviderConfiguredError("未配置 AI 服务商，请先通过后端接口添加服务商")
 
         # 2. 组装提示词与图片数据
         prompt_text = LISTING_PROMPT

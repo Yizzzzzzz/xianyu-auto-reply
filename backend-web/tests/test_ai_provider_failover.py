@@ -301,7 +301,7 @@ class TestAiProviderFailover(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(NoProviderConfiguredError) as ctx:
             await service.generate_listing(self.sample_image_bytes)
 
-        self.assertIn("未配置 AI 服务商，请先在设置中添加", str(ctx.exception))
+        self.assertIn("未配置 AI 服务商，请先通过后端接口添加服务商", str(ctx.exception))
 
     # ==================== 5. 密钥脱敏与入库安全性 ====================
 
