@@ -890,7 +890,15 @@ class AiProviderFailoverService:
         if not providers:
             raise NoProviderConfiguredError("未配置 AI 服务商，请先通过后端接口添加服务商")
 
-        unsupported_keywords = ("unsupported", "not support", "不支持", "image generation", "does not support")
+        unsupported_keywords = (
+            "unsupported",
+            "not support",
+            "does not support",
+            "不支持",
+            "image generation",
+            "image",
+            "model",
+        )
         unsupported_errors: List[str] = []
         provider_errors: List[str] = []
 
