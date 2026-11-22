@@ -56,7 +56,7 @@ class AuthService:
                 return True, f"账号已被锁定，请{remaining_str}后再试"
         return False, None
 
-    async def _handle_login_fail(self, user: User) -> str:
+    async def _handle_login_fail(self, user: User, label: str = "用户名") -> str:
         """
         处理登录失败，增加失败次数
         返回: 错误提示信息
@@ -73,7 +73,7 @@ class AuthService:
         
         await self.session.flush()
         await self.session.commit()
-        return f"用户名或密码错误，还剩{remaining_attempts}次尝试机会"
+        return f"{label}或密码错误，还剩{remaining_attempts}次尝试机会"
 
     async def _reset_login_fail(self, user: User) -> None:
         """登录成功后重置失败次数"""
@@ -136,6 +136,33 @@ class AuthService:
         await self._reset_login_fail(user)
         return user, None
 
+    async def authenticate_by_phone(self, phone: str, password: str) -> Tuple[Optional[User], Optional[str]]:
+        """
+        通过手机号认证
+        返回: (用户对象, 错误信息)
+        """
+        if not phone:
+            return None, "请输入手机号"
+        stmt = select(User).where(func.lower(User.phone) == phone.lower())
+        user = (await self.session.execute(stmt)).scalar_one_or_none()
+        
+        if not user:
+            return None, "手机号或密码错误"
+        
+        # 检查是否被锁定
+        is_locked, lock_msg = self._check_login_locked(user)
+        if is_locked:
+            return None, lock_msg
+        
+        # 验证密码
+        if not self._verify_user_password(user, password):
+            error_msg = await self._handle_login_fail(user, label="手机号")
+            return None, error_msg
+        
+        # 登录成功，重置失败次数
+        await self._reset_login_fail(user)
+        return user, None
+
     def _verify_user_password(self, user: User, password: Optional[str]) -> bool:
         if not password:
             return False
@@ -144,9 +171,20 @@ class AuthService:
             return sha256(password.encode("utf-8")).hexdigest() == stored_hash.lower()
         return security.verify_password(password, stored_hash)
 
-    async def find_login_user(self, account: str, *, by_email: bool = False) -> Optional[User]:
+    async def find_login_user(
+        self,
+        account: str,
+        *,
+        by_email: bool = False,
+        by_phone: bool = False,
+    ) -> Optional[User]:
         """按认证同一大小写规则查询账号，供后缀检查、限流和失败审计读取绑定邮箱。"""
-        column = User.email if by_email else User.username
+        if by_phone:
+            column = User.phone
+        elif by_email:
+            column = User.email
+        else:
+            column = User.username
         result = await self.session.execute(select(User).where(func.lower(column) == account.lower()))
         return result.scalar_one_or_none()
 

@@ -34,6 +34,7 @@ class RefreshToken(BaseModel):
 
 
 class LoginRequest(BaseModel):
+    identifier: Optional[str] = None
     username: Optional[str] = None
     email: Optional[EmailStr] = None
     password: Optional[str] = None

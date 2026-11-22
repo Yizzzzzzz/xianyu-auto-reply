@@ -29,6 +29,7 @@ from common.utils.time_utils import safe_isoformat
 LOGIN_METHOD_USERNAME_PASSWORD = "username_password"  # 账号密码
 LOGIN_METHOD_EMAIL_PASSWORD = "email_password"  # 邮箱密码
 LOGIN_METHOD_EMAIL_CODE = "email_code"  # 邮箱验证码
+LOGIN_METHOD_PHONE_PASSWORD = "phone_password"  # 手机号密码
 
 
 class UserLoginLogService:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,7 +12,8 @@ from app.services.auth import AuthService
 from app.services.system_setting_service import SystemSettingService
 from app.services.user_login_log_service import (
     LOGIN_METHOD_EMAIL_CODE, LOGIN_METHOD_EMAIL_PASSWORD,
-    LOGIN_METHOD_USERNAME_PASSWORD, UserLoginLogService,
+    LOGIN_METHOD_PHONE_PASSWORD, LOGIN_METHOD_USERNAME_PASSWORD,
+    UserLoginLogService,
 )
 from common.models.user import User, UserRole, UserStatus
 from common.db.session_recovery import rollback_session
@@ -22,6 +24,8 @@ from common.services.auth_rate_limit_service import (
 from common.services.email_domain_policy import EmailDomainRejected, enforce_email_domain
 from common.services.email_verification_code_service import check_email_code
 from common.utils.async_cleanup import complete_before_cancellation
+
+PHONE_PATTERN = re.compile(r"^1[3-9]\d{9}$")
 
 
 class LoginRejected(ValueError):
@@ -38,10 +42,31 @@ async def perform_login(
     login_log_service: UserLoginLogService,
 ) -> LoginResponse:
     """执行三种登录方式；参数为请求、IP 和现有服务，返回兼容旧客户端的登录响应。"""
-    method = LOGIN_METHOD_USERNAME_PASSWORD
-    if not (payload.username and payload.password) and payload.email:
-        method = LOGIN_METHOD_EMAIL_PASSWORD if payload.password else LOGIN_METHOD_EMAIL_CODE
-    account = payload.username if method == LOGIN_METHOD_USERNAME_PASSWORD else payload.email
+    identifier = payload.identifier.strip() if payload.identifier else None
+    if identifier:
+        if PHONE_PATTERN.match(identifier):
+            method = LOGIN_METHOD_PHONE_PASSWORD
+            account = identifier
+        elif "@" in identifier:
+            method = LOGIN_METHOD_EMAIL_PASSWORD
+            account = identifier
+        else:
+            method = LOGIN_METHOD_USERNAME_PASSWORD
+            account = identifier
+    else:
+        if payload.username and payload.password:
+            method = LOGIN_METHOD_USERNAME_PASSWORD
+            account = payload.username
+        elif payload.email and payload.password:
+            method = LOGIN_METHOD_EMAIL_PASSWORD
+            account = payload.email
+        elif payload.email and payload.verification_code and not payload.password:
+            method = LOGIN_METHOD_EMAIL_CODE
+            account = payload.email
+        else:
+            method = LOGIN_METHOD_USERNAME_PASSWORD
+            account = payload.username or payload.email or ''
+
     account = account or ''
     user: User | None = None
     attempt = None
@@ -53,16 +78,24 @@ async def perform_login(
     cancellation = None
     needs_recovery = False
     try:
-        user = await auth_service.find_login_user(account, by_email=method != LOGIN_METHOD_USERNAME_PASSWORD)
+        by_phone = (method == LOGIN_METHOD_PHONE_PASSWORD)
+        by_email = (method in {LOGIN_METHOD_EMAIL_PASSWORD, LOGIN_METHOD_EMAIL_CODE})
+        user = await auth_service.find_login_user(account, by_phone=by_phone, by_email=by_email)
         owner_id = user.id if user else None
         # 所有拒绝均在占用限流额度后执行；账号登录绑定邮箱与邮箱登录共用邮箱维度。
+        attempt_account = user.username if user else (identifier or account)
+        fallback_email = payload.email or (identifier if (identifier and "@" in identifier) else None)
+        attempt_email = user.email if user else fallback_email
         attempt = await begin_login_attempt(
-            ip, user.username if user else account, user.email if user else payload.email,
+            ip, attempt_account, attempt_email,
         )
-        email = (user.email if user else None) if method == LOGIN_METHOD_USERNAME_PASSWORD else payload.email
+        if method in {LOGIN_METHOD_USERNAME_PASSWORD, LOGIN_METHOD_PHONE_PASSWORD}:
+            email = user.email if user else None
+        else:
+            email = payload.email or account
         if email:
             await enforce_email_domain(session, email, bound_email=user.email if user else None)
-        if method in {LOGIN_METHOD_USERNAME_PASSWORD, LOGIN_METHOD_EMAIL_PASSWORD} and payload.password:
+        if method in {LOGIN_METHOD_USERNAME_PASSWORD, LOGIN_METHOD_EMAIL_PASSWORD, LOGIN_METHOD_PHONE_PASSWORD} and payload.password:
             settings = await SystemSettingService(session).list_settings()
             if settings.get('login_captcha_enabled') in (None, 'true', '1'):
                 if not payload.geetest_challenge:
@@ -72,6 +105,8 @@ async def perform_login(
                     raise LoginRejected(message)
             if method == LOGIN_METHOD_USERNAME_PASSWORD:
                 authenticated_user, message = await auth_service.authenticate_by_username(account, payload.password)
+            elif method == LOGIN_METHOD_PHONE_PASSWORD:
+                authenticated_user, message = await auth_service.authenticate_by_phone(account, payload.password)
             else:
                 authenticated_user, message = await auth_service.authenticate_by_email(account, payload.password)
             if not authenticated_user:
