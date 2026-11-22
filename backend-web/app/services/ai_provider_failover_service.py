@@ -21,7 +21,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.ai_provider_crypto import decrypt_api_key
 from common.models.ai_provider_config import AiProviderConfig
+from common.models.system_setting import SystemSetting
 from common.services.ai_provider_service import build_openai_url, extract_response_error
+
+# AI 提示词在全局键值表 xy_system_settings 中的键；可通过后端接口 /api/v1/ai/prompts 修改，
+# 保存后下一次调用即生效；无自定义值（未配置或为空）时回退到代码里的默认常量。
+LISTING_PROMPT_KEY = "ai.prompts.listing"
+PICK_PROMPT_KEY = "ai.prompts.pick"
 
 # 固定提示词：后端定义，无需前端传入
 LISTING_PROMPT = """你是一个专业的闲鱼二手交易平台商品发布助手。请仔细观察提供的商品图片，并生成适合在闲鱼发布的商品信息。
@@ -182,6 +188,18 @@ class AiProviderFailoverService:
             raise ValueError("未配置 AI 服务商加密密钥（AI_PROVIDER_ENCRYPTION_KEY）")
         return key.strip()
 
+    async def _get_prompt(self, key: str, default: str) -> str:
+        """读取 xy_system_settings 中的提示词；无自定义值（未配置或为空）时回退到默认常量。
+
+        每次调用都实时读取，不缓存，保存后下一次调用即用新提示词。
+        """
+        stmt = select(SystemSetting).where(SystemSetting.key == key)
+        result = await self.session.execute(stmt)
+        record = result.scalars().first()
+        if record and record.value and record.value.strip():
+            return record.value
+        return default
+
     async def generate_listing(
         self,
         image_bytes: bytes,
@@ -215,8 +233,8 @@ class AiProviderFailoverService:
         if not providers:
             raise NoProviderConfiguredError("未配置 AI 服务商，请先通过后端接口添加服务商")
 
-        # 2. 组装提示词与图片数据
-        prompt_text = LISTING_PROMPT
+        # 2. 组装提示词与图片数据（提示词每次实时读配置，未配置则用默认常量）
+        prompt_text = await self._get_prompt(LISTING_PROMPT_KEY, LISTING_PROMPT)
         if hint and hint.strip():
             prompt_text += f"\n\n补充关键词与要求：{hint.strip()}"
 
@@ -366,7 +384,9 @@ class AiProviderFailoverService:
             f"{i}. 标题：{c.get('title', '')} 价格：¥{c.get('price', '')}"
             for i, c in enumerate(competitors)
         )
-        prompt_text = PICK_PROMPT.replace("{candidates}", candidates)
+        # 提示词每次实时读配置，未配置则用默认常量；{candidates} 由调用处填入候选同款列表
+        prompt_template = await self._get_prompt(PICK_PROMPT_KEY, PICK_PROMPT)
+        prompt_text = prompt_template.replace("{candidates}", candidates)
         base64_img = base64.b64encode(image_bytes).decode("utf-8")
         provider_errors: List[str] = []
 

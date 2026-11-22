@@ -12,6 +12,8 @@ AI 服务商配置与容灾调用单元测试
 8. PUT 更新时“Key 为空或等于掩码值保持原 Key 不变”规则验证
 9. 连通性测试接口（GET /models）成功与失败响应
 10. 服务商优先级重排（reorder）
+11. AI 提示词可配置：未配置用默认提示词、保存后下次调用即用新值、
+    校验不过 400 且不保存、pick 缺 {candidates} 被拒绝、恢复默认回到原值
 """
 from __future__ import annotations
 
@@ -23,11 +25,18 @@ import threading
 import unittest
 
 from cryptography.fernet import Fernet
+from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from app.api.routes.ai_providers import _serialize_provider
+from app.api.routes.ai_providers import (
+    AiPromptsUpdateRequest,
+    _serialize_provider,
+    get_ai_prompts,
+    reset_ai_prompts,
+    update_ai_prompts,
+)
 from app.services.ai_provider_crypto import (
     decrypt_api_key,
     encrypt_api_key,
@@ -36,11 +45,16 @@ from app.services.ai_provider_crypto import (
 from app.services.ai_provider_failover_service import (
     AiProviderFailoverService,
     AllProvidersFailedError,
+    LISTING_PROMPT,
+    LISTING_PROMPT_KEY,
+    PICK_PROMPT,
+    PICK_PROMPT_KEY,
     NoProviderConfiguredError,
     _parse_listing_json,
     _parse_pick_json,
 )
 from common.models.ai_provider_config import AiProviderConfig
+from common.models.system_setting import SystemSetting
 
 
 class MockHttpServer:
@@ -50,6 +64,7 @@ class MockHttpServer:
         self.routes: dict[str, tuple[int, dict]] = {}
         self.request_counts: dict[str, int] = {}
         self.received_auth_headers: dict[str, str] = {}
+        self.received_bodies: dict[str, bytes] = {}
         self._server: http.server.ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self.port: int = 0
@@ -63,11 +78,12 @@ class MockHttpServer:
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_POST(self) -> None:
                 content_length = int(self.headers.get("Content-Length", 0))
-                _ = self.rfile.read(content_length)
+                body = self.rfile.read(content_length)
                 auth = self.headers.get("Authorization", "")
                 path = self.path
                 outer.request_counts[path] = outer.request_counts.get(path, 0) + 1
                 outer.received_auth_headers[path] = auth
+                outer.received_bodies[path] = body
 
                 if path in outer.routes:
                     status_code, data = outer.routes[path]
@@ -128,6 +144,7 @@ class TestAiProviderFailover(unittest.IsolatedAsyncioTestCase):
         )
         async with self.engine.begin() as conn:
             await conn.run_sync(AiProviderConfig.__table__.create)
+            await conn.run_sync(SystemSetting.__table__.create)
 
         self.session_factory = async_sessionmaker(self.engine, expire_on_commit=False)
         self.session: AsyncSession = self.session_factory()
@@ -380,7 +397,7 @@ class TestAiProviderFailover(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res_2["title"], "机械键盘")
 
         # 带 search_keyword：解析出简短搜索词；不带时为空串（调用方回退到标题）
-        raw_3 = {title: 二手红轴机械键盘, description: 九成新, category: 数码配件, search_keyword: 机械键盘}
+        raw_3 = '{"title": "二手红轴机械键盘", "description": "九成新", "category": "数码配件", "search_keyword": "机械键盘"}'
         res_3 = _parse_listing_json(raw_3)
         self.assertEqual(res_3["search_keyword"], "机械键盘")
         self.assertEqual(res_1["search_keyword"], "")
@@ -485,6 +502,185 @@ class TestAiProviderFailover(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(p3.priority, 0)
         self.assertEqual(p2.priority, 1)
         self.assertEqual(p1.priority, 2)
+
+
+    # ==================== 11. AI 提示词可配置 ====================
+
+    def _captured_prompt_text(self, path: str) -> str:
+        """从 mock 服务收到的请求体中取出发给模型的提示词文本"""
+        raw = self.mock_server.received_bodies.get(path, b"")
+        payload = json.loads(raw.decode("utf-8"))
+        content = payload["messages"][0]["content"]
+        for part in content:
+            if part.get("type") == "text":
+                return str(part["text"])
+        return ""
+
+    async def _save_prompt_setting(self, key: str, value: str) -> None:
+        self.session.add(SystemSetting(key=key, value=value, description="测试"))
+        await self.session.commit()
+
+    async def _get_prompt_setting(self, key: str) -> SystemSetting | None:
+        result = await self.session.execute(
+            select(SystemSetting).where(SystemSetting.key == key)
+        )
+        return result.scalars().first()
+
+    async def test_default_listing_prompt_used_when_not_configured(self) -> None:
+        """未配置提示词时 generate_listing 使用代码里的默认 LISTING_PROMPT"""
+        success_content = json.dumps(
+            {
+                "title": "九成新闲鱼二手手机",
+                "description": "个人自用，成色极佳，无拆修，包装配件齐全。",
+                "category": "手机数码",
+                "search_keyword": "二手手机",
+            },
+            ensure_ascii=False,
+        )
+        self.mock_server.set_route(
+            "/p1/chat/completions",
+            200,
+            {"choices": [{"message": {"role": "assistant", "content": success_content}}]},
+        )
+        await self._add_provider(name="Provider 1", path="/p1", priority=10)
+
+        service = AiProviderFailoverService(session=self.session, fernet_key=self.fernet_key)
+        result = await service.generate_listing(self.sample_image_bytes)
+
+        self.assertEqual(result["title"], "九成新闲鱼二手手机")
+        self.assertEqual(self._captured_prompt_text("/p1/chat/completions"), LISTING_PROMPT)
+
+    async def test_custom_listing_prompt_used_after_save(self) -> None:
+        """保存自定义 listing 提示词后，下一次 generate_listing 即用新值"""
+        custom_prompt = "自定义文案提示词 title description category search_keyword 测试"
+        await self._save_prompt_setting(LISTING_PROMPT_KEY, custom_prompt)
+
+        success_content = json.dumps(
+            {
+                "title": "测试标题",
+                "description": "测试描述内容。",
+                "category": "居家日用",
+                "search_keyword": "收纳盒",
+            },
+            ensure_ascii=False,
+        )
+        self.mock_server.set_route(
+            "/p1/chat/completions",
+            200,
+            {"choices": [{"message": {"role": "assistant", "content": success_content}}]},
+        )
+        await self._add_provider(name="Provider 1", path="/p1", priority=10)
+
+        service = AiProviderFailoverService(session=self.session, fernet_key=self.fernet_key)
+        await service.generate_listing(self.sample_image_bytes)
+
+        self.assertEqual(self._captured_prompt_text("/p1/chat/completions"), custom_prompt)
+
+    async def test_custom_pick_prompt_used_after_save(self) -> None:
+        """保存自定义 pick 提示词后，下一次 pick_competitor 即用新值且填入候选列表"""
+        custom_prompt = "自定义挑同款提示词 index suggested_price reason {candidates} 测试"
+        await self._save_prompt_setting(PICK_PROMPT_KEY, custom_prompt)
+
+        pick_content = json.dumps(
+            {"index": 0, "suggested_price": 12.5, "reason": "同款同型号"},
+            ensure_ascii=False,
+        )
+        self.mock_server.set_route(
+            "/p1/chat/completions",
+            200,
+            {"choices": [{"message": {"role": "assistant", "content": pick_content}}]},
+        )
+        await self._add_provider(name="Provider 1", path="/p1", priority=10)
+
+        service = AiProviderFailoverService(session=self.session, fernet_key=self.fernet_key)
+        result = await service.pick_competitor(
+            self.sample_image_bytes,
+            [{"title": "测试同款", "price": 12.0}],
+        )
+
+        self.assertEqual(result["competitor_index"], 0)
+        self.assertEqual(result["suggested_price"], 12.5)
+        expected_prompt = custom_prompt.replace(
+            "{candidates}", "0. 标题：测试同款 价格：¥12.0"
+        )
+        self.assertEqual(self._captured_prompt_text("/p1/chat/completions"), expected_prompt)
+
+    async def test_get_prompts_returns_defaults_when_unconfigured(self) -> None:
+        """未配置过提示词时 GET 返回默认提示词 + is_default true + updated_at 为空"""
+        result = await get_ai_prompts(None, self.session)
+
+        self.assertEqual(result["listing_prompt"], LISTING_PROMPT)
+        self.assertEqual(result["pick_prompt"], PICK_PROMPT)
+        self.assertTrue(result["listing_is_default"])
+        self.assertTrue(result["pick_is_default"])
+        self.assertIsNone(result["updated_at"])
+
+    async def test_update_prompts_validation_rejects_bad_values_and_saves_nothing(self) -> None:
+        """校验不过返回 400 且不保存：listing 缺字段、pick 缺 {candidates}、空白值"""
+        # listing 缺 search_keyword → 400，数据库里不产生记录
+        with self.assertRaises(HTTPException) as ctx:
+            await update_ai_prompts(
+                AiPromptsUpdateRequest(listing_prompt="只有 title description category 的提示词"),
+                None,
+                self.session,
+            )
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIsNone(await self._get_prompt_setting(LISTING_PROMPT_KEY))
+
+        # pick 缺 {candidates} 占位符 → 400，数据库里不产生记录
+        with self.assertRaises(HTTPException) as ctx:
+            await update_ai_prompts(
+                AiPromptsUpdateRequest(
+                    pick_prompt="挑同款 index suggested_price reason 但没有占位符"
+                ),
+                None,
+                self.session,
+            )
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIsNone(await self._get_prompt_setting(PICK_PROMPT_KEY))
+
+        # 空白提示词 → 400
+        with self.assertRaises(HTTPException) as ctx:
+            await update_ai_prompts(
+                AiPromptsUpdateRequest(listing_prompt="   "),
+                None,
+                self.session,
+            )
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIsNone(await self._get_prompt_setting(LISTING_PROMPT_KEY))
+
+    async def test_update_then_reset_prompts_restores_defaults(self) -> None:
+        """PUT 保存后 GET 读到新值；POST reset 后回到默认提示词且数据库行已删除"""
+        custom_listing = "自定义 title description category search_keyword 提示词"
+
+        updated = await update_ai_prompts(
+            AiPromptsUpdateRequest(listing_prompt=custom_listing),
+            None,
+            self.session,
+        )
+        self.assertEqual(updated["listing_prompt"], custom_listing)
+        self.assertFalse(updated["listing_is_default"])
+        self.assertTrue(updated["pick_is_default"])
+        self.assertIsNotNone(updated["updated_at"])
+
+        got = await get_ai_prompts(None, self.session)
+        self.assertEqual(got["listing_prompt"], custom_listing)
+        self.assertFalse(got["listing_is_default"])
+
+        reset = await reset_ai_prompts(None, self.session)
+        self.assertEqual(reset["listing_prompt"], LISTING_PROMPT)
+        self.assertEqual(reset["pick_prompt"], PICK_PROMPT)
+        self.assertTrue(reset["listing_is_default"])
+        self.assertTrue(reset["pick_is_default"])
+
+        rows = (
+            await self.session.execute(
+                select(SystemSetting).where(
+                    SystemSetting.key.in_([LISTING_PROMPT_KEY, PICK_PROMPT_KEY])
+                )
+            )
+        ).scalars().all()
+        self.assertEqual(rows, [])
 
 
 if __name__ == "__main__":

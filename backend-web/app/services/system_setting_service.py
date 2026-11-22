@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from common.models.system_setting import SystemSetting
 from common.services.advertisement_types import AD_PRICE_DEFAULTS, parse_ad_price
+from app.services.ai_provider_failover_service import LISTING_PROMPT, PICK_PROMPT
 from app.services.payment_config_service import PAYMENT_SETTING_DEFAULTS
 from common.services.remote_token_api import (
     TOKEN_REMOTE_SECRET_KEY_SETTING_KEY,
@@ -105,6 +106,10 @@ DEFAULT_SYSTEM_SETTINGS: dict[str, tuple[str, str | None]] = {
     "token.api_mode": ("web", "Token获取方式：web-网页接口/remote-远程接口"),
     "token.remote_url": ("", "Token远程接口URL"),
     "token.remote_secret_key": ("", "Token远程接口秘钥"),
+    # AI 提示词：后端定义，发布流程调用；通过专用接口 /api/v1/ai/prompts 管理，不走通用设置接口。
+    # 启动时 ensure_default_settings() 幂等补齐，旧数据不受影响；值与代码里的默认常量一致。
+    "ai.prompts.listing": (LISTING_PROMPT, "AI 发布文案生成提示词（发布第 2 步：生成标题/详情/分类/搜索词）"),
+    "ai.prompts.pick": (PICK_PROMPT, "AI 挑同款定价提示词（发布第 4 步：挑最相关同款并推断建议价）"),
 }
 
 # 不需要XSS转义的键（布尔值、数字等）
@@ -181,6 +186,9 @@ NO_ESCAPE_KEYS = {
     # Token远程接口配置：URL 和秘钥不能被 XSS 转义
     TOKEN_REMOTE_URL_SETTING_KEY,
     TOKEN_REMOTE_SECRET_KEY_SETTING_KEY,
+    # AI 提示词：含引号、大括号与 JSON 示例，不能被 XSS 转义；读写走专用接口 /api/v1/ai/prompts。
+    "ai.prompts.listing",
+    "ai.prompts.pick",
     # 服务间令牌不会经由通用设置接口写入；加入免转义集合，防止内部维护时被破坏。
     "security.internal_api_token",
 }

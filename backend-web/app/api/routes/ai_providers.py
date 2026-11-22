@@ -27,9 +27,14 @@ from app.services.ai_provider_crypto import (
 from app.services.ai_provider_failover_service import (
     AiProviderFailoverService,
     AllProvidersFailedError,
+    LISTING_PROMPT,
+    LISTING_PROMPT_KEY,
+    PICK_PROMPT,
+    PICK_PROMPT_KEY,
     NoProviderConfiguredError,
 )
 from common.models.ai_provider_config import AiProviderConfig
+from common.models.system_setting import SystemSetting
 from common.models.user import User
 from common.services.ai_provider_service import build_openai_url, extract_response_error
 
@@ -103,6 +108,23 @@ class AiProviderTestResponse(BaseModel):
     message: str
 
 
+class AiPromptsUpdateRequest(BaseModel):
+    """更新 AI 提示词请求（只更新传了的字段）"""
+
+    listing_prompt: Optional[str] = Field(None, description="发布文案生成提示词（发布第 2 步）")
+    pick_prompt: Optional[str] = Field(None, description="挑同款定价提示词（发布第 4 步）")
+
+
+class AiPromptsResponse(BaseModel):
+    """AI 提示词返回模型"""
+
+    listing_prompt: str = Field(..., description="发布文案生成提示词")
+    pick_prompt: str = Field(..., description="挑同款定价提示词")
+    listing_is_default: bool = Field(..., description="发布文案提示词是否为默认提示词")
+    pick_is_default: bool = Field(..., description="挑同款提示词是否为默认提示词")
+    updated_at: Optional[datetime] = Field(None, description="两条记录中较新的更新时间；未配置过时为空")
+
+
 class GenerateListingResponse(BaseModel):
     """生成商品文案响应"""
 
@@ -170,6 +192,93 @@ def _serialize_provider(provider: AiProviderConfig, encryption_key: str) -> dict
         "created_at": provider.created_at,
         "updated_at": provider.updated_at,
     }
+
+
+# ==================== AI 提示词管理（xy_system_settings，专用接口，不走通用设置接口） ====================
+
+# 提示词在 xy_system_settings 中的描述（保存时写入 description，便于在设置表里辨认用途）
+LISTING_PROMPT_DESCRIPTION = "AI 发布文案生成提示词（发布第 2 步：生成标题/详情/分类/搜索词）"
+PICK_PROMPT_DESCRIPTION = "AI 挑同款定价提示词（发布第 4 步：挑最相关同款并推断建议价）"
+
+# 校验要求：提示词必须提到模型输出 JSON 的字段名，否则模型输出无法解析
+LISTING_PROMPT_REQUIRED_WORDS = ("title", "description", "category", "search_keyword")
+PICK_PROMPT_REQUIRED_WORDS = ("index", "suggested_price", "reason")
+
+
+def _validate_listing_prompt(value: str) -> None:
+    """校验发布文案提示词：不能为空白，必须包含四个输出字段名"""
+    if not value or not value.strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="listing_prompt 不能为空")
+    missing = [word for word in LISTING_PROMPT_REQUIRED_WORDS if word not in value]
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"listing_prompt 必须包含 {', '.join(missing)}（生成结果 JSON 的字段名），否则模型输出无法解析",
+        )
+
+
+def _validate_pick_prompt(value: str) -> None:
+    """校验挑同款提示词：不能为空白，必须包含三个输出字段名与 {candidates} 占位符"""
+    if not value or not value.strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="pick_prompt 不能为空")
+    missing = [word for word in PICK_PROMPT_REQUIRED_WORDS if word not in value]
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"pick_prompt 必须包含 {', '.join(missing)}（挑同款结果 JSON 的字段名），否则模型输出无法解析",
+        )
+    if "{candidates}" not in value:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="pick_prompt 必须包含 {candidates} 占位符（调用时由系统填入候选同款列表）",
+        )
+
+
+async def _load_prompt_settings(session: AsyncSession) -> dict[str, Any]:
+    """读取两条提示词配置；未配置（行不存在或值为空）时返回代码里的默认常量。"""
+    result = await session.execute(
+        select(SystemSetting).where(SystemSetting.key.in_([LISTING_PROMPT_KEY, PICK_PROMPT_KEY]))
+    )
+    records = {record.key: record for record in result.scalars().all()}
+    listing_row = records.get(LISTING_PROMPT_KEY)
+    pick_row = records.get(PICK_PROMPT_KEY)
+
+    listing_value = (
+        listing_row.value
+        if listing_row and listing_row.value and listing_row.value.strip()
+        else LISTING_PROMPT
+    )
+    pick_value = (
+        pick_row.value
+        if pick_row and pick_row.value and pick_row.value.strip()
+        else PICK_PROMPT
+    )
+    updated_ats = [
+        row.updated_at
+        for row in (listing_row, pick_row)
+        if row is not None and row.updated_at is not None
+    ]
+    return {
+        "listing_prompt": listing_value,
+        "pick_prompt": pick_value,
+        "listing_is_default": listing_value == LISTING_PROMPT,
+        "pick_is_default": pick_value == PICK_PROMPT,
+        "updated_at": max(updated_ats) if updated_ats else None,
+    }
+
+
+async def _upsert_prompt_setting(
+    session: AsyncSession, key: str, value: str, description: str
+) -> None:
+    """新增或更新一条提示词配置。直接写原始值，不经过通用设置接口的 XSS 转义。"""
+    result = await session.execute(select(SystemSetting).where(SystemSetting.key == key))
+    record = result.scalars().first()
+    if record:
+        record.value = value
+        record.description = description
+    else:
+        record = SystemSetting(key=key, value=value, description=description)
+    session.add(record)
 
 
 # ==================== 路由接口 ====================
@@ -392,6 +501,67 @@ async def delete_provider(
     await session.delete(provider)
     await session.commit()
     return {"ok": True, "message": "服务商配置已删除"}
+
+
+@router.get("/prompts", response_model=AiPromptsResponse)
+async def get_ai_prompts(
+    _: User = Depends(get_current_admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    """获取两条 AI 提示词（未配置过时返回默认提示词 + is_default true）"""
+    return await _load_prompt_settings(session)
+
+
+@router.put("/prompts", response_model=AiPromptsResponse)
+async def update_ai_prompts(
+    body: AiPromptsUpdateRequest,
+    _: User = Depends(get_current_admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    """更新 AI 提示词，只更新传了的字段；校验不过返回 400 且不保存。"""
+    if body.listing_prompt is None and body.pick_prompt is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="请至少提供 listing_prompt 或 pick_prompt 其中一个",
+        )
+    # 先全部校验通过再写入，任一字段不合法都不保存
+    if body.listing_prompt is not None:
+        _validate_listing_prompt(body.listing_prompt)
+    if body.pick_prompt is not None:
+        _validate_pick_prompt(body.pick_prompt)
+
+    try:
+        if body.listing_prompt is not None:
+            await _upsert_prompt_setting(
+                session, LISTING_PROMPT_KEY, body.listing_prompt, LISTING_PROMPT_DESCRIPTION
+            )
+        if body.pick_prompt is not None:
+            await _upsert_prompt_setting(
+                session, PICK_PROMPT_KEY, body.pick_prompt, PICK_PROMPT_DESCRIPTION
+            )
+        await session.commit()
+    except Exception as exc:
+        await session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"保存 AI 提示词失败：{exc}",
+        )
+    return await _load_prompt_settings(session)
+
+
+@router.post("/prompts/reset", response_model=AiPromptsResponse)
+async def reset_ai_prompts(
+    _: User = Depends(get_current_admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    """恢复默认：删除两条自定义提示词行，之后 GET 返回默认提示词 + is_default true。"""
+    result = await session.execute(
+        select(SystemSetting).where(SystemSetting.key.in_([LISTING_PROMPT_KEY, PICK_PROMPT_KEY]))
+    )
+    for record in result.scalars().all():
+        await session.delete(record)
+    await session.commit()
+    return await _load_prompt_settings(session)
 
 
 @router.post("/generate-listing", response_model=GenerateListingResponse)
