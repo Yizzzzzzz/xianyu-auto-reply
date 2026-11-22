@@ -89,6 +89,17 @@ class AllProvidersFailedError(AiFailoverError):
         self.errors = errors
 
 
+class ImageGenerationNotSupportedError(AiFailoverError):
+    """当前服务商不支持图片生成"""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+CHAT_SYSTEM_PROMPT = "你是闲鱼商品识别助手，基于图片和对话回答问题，写实不编造，不知道就说不知道。"
+
+
 def _parse_listing_json(raw_text: str) -> dict[str, str]:
     """从模型返回文本中解析闲鱼文案 JSON 对象"""
     text = raw_text.strip()
@@ -706,6 +717,288 @@ class AiProviderFailoverService:
                 await self.session.commit()
                 provider_errors.append(f"[{provider.name}] {err_msg}")
                 continue
+
+        raise AllProvidersFailedError(
+            message="所有 AI 服务商均调用失败",
+            errors=provider_errors,
+        )
+
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """根据历史对话消息进行追问回复（容灾轮询）
+
+        Args:
+            messages: 对话历史消息列表，每项必须为 dict 且 role 为 user 或 assistant，content 非空。
+
+        Returns:
+            dict: {reply, provider_used}
+
+        Raises:
+            ValueError: messages 入参校验不通过。
+            NoProviderConfiguredError: 未配置或未启用任何服务商（对应 503）。
+            AllProvidersFailedError: 所有服务商均调用失败（对应 502）。
+        """
+        if not isinstance(messages, list) or not messages:
+            raise ValueError("messages 必须是非空列表")
+
+        for idx, item in enumerate(messages):
+            if not isinstance(item, dict):
+                raise ValueError(f"messages[{idx}] 必须是字典")
+            role = item.get("role")
+            if role not in ("user", "assistant"):
+                raise ValueError(f"messages[{idx}].role 必须为 user 或 assistant")
+            content = item.get("content")
+            if content is None:
+                raise ValueError(f"messages[{idx}].content 不能为空")
+            if isinstance(content, str) and not content.strip():
+                raise ValueError(f"messages[{idx}].content 不能为空字符串")
+            if isinstance(content, list) and len(content) == 0:
+                raise ValueError(f"messages[{idx}].content 列表不能为空")
+            if not isinstance(content, (str, list)):
+                raise ValueError(f"messages[{idx}].content 必须是字符串或列表")
+
+        stmt = (
+            select(AiProviderConfig)
+            .where(AiProviderConfig.is_enabled == True)
+            .order_by(AiProviderConfig.priority.asc(), AiProviderConfig.id.asc())
+        )
+        result = await self.session.execute(stmt)
+        providers = list(result.scalars().all())
+
+        if not providers:
+            raise NoProviderConfiguredError("未配置 AI 服务商，请先通过后端接口添加服务商")
+
+        full_messages = [{"role": "system", "content": CHAT_SYSTEM_PROMPT}] + messages
+        provider_errors: List[str] = []
+
+        for provider in providers:
+            plain_key = ""
+            try:
+                plain_key = decrypt_api_key(provider.api_key, self._get_encryption_key())
+            except Exception as exc:
+                err_msg = f"解密 API Key 失败: {str(exc)}"
+                provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                await self.session.commit()
+                provider_errors.append(f"[{provider.name}] {err_msg}")
+                continue
+
+            url = build_openai_url(provider.base_url, "chat/completions")
+            payload = {
+                "model": provider.model,
+                "messages": full_messages,
+                "temperature": 0.7,
+                "max_tokens": 4096,
+            }
+            headers = {
+                "Authorization": f"Bearer {plain_key}",
+                "Content-Type": "application/json",
+            }
+            timeout_sec = float(provider.timeout_seconds or 30)
+
+            try:
+                if self._http_client is not None:
+                    resp = await self._http_client.post(url, json=payload, headers=headers, timeout=timeout_sec)
+                else:
+                    async with _create_async_client(timeout=timeout_sec) as client:
+                        resp = await client.post(url, json=payload, headers=headers)
+
+                if not resp.is_success:
+                    err_summary = extract_response_error(resp)
+                    if plain_key and plain_key in err_summary:
+                        err_summary = err_summary.replace(plain_key, "****")
+                    err_msg = f"HTTP {resp.status_code}: {err_summary}"
+                    provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                    await self.session.commit()
+                    provider_errors.append(f"[{provider.name}] {err_msg}")
+                    continue
+
+                resp_data = resp.json()
+                choices = resp_data.get("choices")
+                if not choices or not isinstance(choices, list):
+                    err_msg = "返回数据中缺少 choices 字段"
+                    provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                    await self.session.commit()
+                    provider_errors.append(f"[{provider.name}] {err_msg}")
+                    continue
+
+                raw_content = choices[0].get("message", {}).get("content", "")
+                if not raw_content or not isinstance(raw_content, str):
+                    _fr = choices[0].get("finish_reason") or ""
+                    err_msg = "返回消息正文为空" + (f"（finish_reason={_fr}，若为 length 说明输出 token 上限被模型思考过程占满）" if _fr else "")
+                    provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                    await self.session.commit()
+                    provider_errors.append(f"[{provider.name}] {err_msg}")
+                    continue
+
+                provider.last_error = None
+                provider.last_used_at = datetime.now()
+                await self.session.commit()
+
+                return {
+                    "reply": raw_content,
+                    "provider_used": provider.name,
+                }
+
+            except httpx.TimeoutException:
+                err_msg = f"请求超时（{int(timeout_sec)}秒）"
+                provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                await self.session.commit()
+                provider_errors.append(f"[{provider.name}] {err_msg}")
+                continue
+            except Exception as exc:
+                err_msg = f"调用异常: {type(exc).__name__}: {str(exc)}"
+                if plain_key and plain_key in err_msg:
+                    err_msg = err_msg.replace(plain_key, "****")
+                provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                await self.session.commit()
+                provider_errors.append(f"[{provider.name}] {err_msg}")
+                continue
+
+        raise AllProvidersFailedError(
+            message="所有 AI 服务商均调用失败",
+            errors=provider_errors,
+        )
+
+    async def generate_image(self, prompt: str) -> dict[str, str]:
+        """根据画面描述生成图片（容灾轮询）
+
+        Args:
+            prompt: 用户输入的画面描述原文。
+
+        Returns:
+            dict: {image_base64, provider_used}
+
+        Raises:
+            ValueError: prompt 为空或非字符串。
+            NoProviderConfiguredError: 未配置或未启用任何服务商（对应 503）。
+            ImageGenerationNotSupportedError: 所有尝试过的服务商均不支持图片生成。
+            AllProvidersFailedError: 所有服务商均调用失败（且并非全部为不支持）。
+        """
+        if not prompt or not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError("画面描述 prompt 不能为空")
+
+        stmt = (
+            select(AiProviderConfig)
+            .where(AiProviderConfig.is_enabled == True)
+            .order_by(AiProviderConfig.priority.asc(), AiProviderConfig.id.asc())
+        )
+        result = await self.session.execute(stmt)
+        providers = list(result.scalars().all())
+
+        if not providers:
+            raise NoProviderConfiguredError("未配置 AI 服务商，请先通过后端接口添加服务商")
+
+        unsupported_keywords = ("unsupported", "not support", "不支持", "image generation", "does not support")
+        unsupported_errors: List[str] = []
+        provider_errors: List[str] = []
+
+        for provider in providers:
+            plain_key = ""
+            try:
+                plain_key = decrypt_api_key(provider.api_key, self._get_encryption_key())
+            except Exception as exc:
+                err_msg = f"解密 API Key 失败: {str(exc)}"
+                provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                await self.session.commit()
+                provider_errors.append(f"[{provider.name}] {err_msg}")
+                continue
+
+            url = build_openai_url(provider.base_url, "images/generations")
+            payload = {
+                "model": provider.model,
+                "prompt": prompt.strip(),
+                "n": 1,
+                "size": "1024x1024",
+                "response_format": "b64_json",
+            }
+            headers = {
+                "Authorization": f"Bearer {plain_key}",
+                "Content-Type": "application/json",
+            }
+            timeout_sec = float(provider.timeout_seconds or 30)
+
+            try:
+                if self._http_client is not None:
+                    resp = await self._http_client.post(url, json=payload, headers=headers, timeout=timeout_sec)
+                else:
+                    async with _create_async_client(timeout=timeout_sec) as client:
+                        resp = await client.post(url, json=payload, headers=headers)
+
+                if not resp.is_success:
+                    err_summary = extract_response_error(resp)
+                    if plain_key and plain_key in err_summary:
+                        err_summary = err_summary.replace(plain_key, "****")
+
+                    # 判定是否为“不支持”：
+                    # 1. 404 或 405 直接算不支持
+                    # 2. 400 且错误文本包含关键词算不支持
+                    is_unsupported = False
+                    if resp.status_code in (404, 405):
+                        is_unsupported = True
+                    elif resp.status_code == 400:
+                        lower_err = err_summary.lower()
+                        if any(kw in lower_err for kw in unsupported_keywords):
+                            is_unsupported = True
+
+                    err_msg = f"HTTP {resp.status_code}: {err_summary}"
+                    provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                    await self.session.commit()
+                    provider_errors.append(f"[{provider.name}] {err_msg}")
+
+                    if is_unsupported:
+                        unsupported_errors.append(f"{provider.name} 返回 {resp.status_code} {err_summary}")
+
+                    continue
+
+                resp_data = resp.json()
+                data_list = resp_data.get("data")
+                if not data_list or not isinstance(data_list, list):
+                    err_msg = "返回数据中缺少 data 列表"
+                    provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                    await self.session.commit()
+                    provider_errors.append(f"[{provider.name}] {err_msg}")
+                    continue
+
+                b64_json = data_list[0].get("b64_json")
+                if not b64_json or not isinstance(b64_json, str):
+                    err_msg = "返回数据中缺少 b64_json 图片数据"
+                    provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                    await self.session.commit()
+                    provider_errors.append(f"[{provider.name}] {err_msg}")
+                    continue
+
+                provider.last_error = None
+                provider.last_used_at = datetime.now()
+                await self.session.commit()
+
+                return {
+                    "image_base64": b64_json,
+                    "provider_used": provider.name,
+                }
+
+            except httpx.TimeoutException:
+                err_msg = f"请求超时（{int(timeout_sec)}秒）"
+                provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                await self.session.commit()
+                provider_errors.append(f"[{provider.name}] {err_msg}")
+                continue
+            except Exception as exc:
+                err_msg = f"调用异常: {type(exc).__name__}: {str(exc)}"
+                if plain_key and plain_key in err_msg:
+                    err_msg = err_msg.replace(plain_key, "****")
+                provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                await self.session.commit()
+                provider_errors.append(f"[{provider.name}] {err_msg}")
+                continue
+
+        # 循环结束：
+        # 如果所有被试过的服务商都返回“不支持”，抛 ImageGenerationNotSupportedError
+        # 否则（至少一条是普通失败）抛 AllProvidersFailedError
+        if len(unsupported_errors) == len(providers):
+            detail_msg = f"当前服务商不支持图片生成：{'；'.join(unsupported_errors)}"
+            raise ImageGenerationNotSupportedError(detail_msg)
 
         raise AllProvidersFailedError(
             message="所有 AI 服务商均调用失败",
