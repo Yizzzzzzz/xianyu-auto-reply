@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 from datetime import datetime
 import json
+import re
 from typing import Any, AsyncGenerator, List, Optional
 
 import httpx
@@ -98,6 +99,133 @@ class ImageGenerationNotSupportedError(AiFailoverError):
 
 
 CHAT_SYSTEM_PROMPT = "你是闲鱼商品识别助手，基于图片和对话回答问题，写实不编造，不知道就说不知道。"
+
+MAX_CHAT_IMAGE_COUNT = 3
+MAX_IMAGE_SIZE_BYTES = 8 * 1024 * 1024  # 8MB
+DATA_IMAGE_URL_PATTERN = re.compile(
+    r"^data:image/(?P<mime>jpeg|jpg|png|webp);base64,(?P<b64>.+)$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _normalize_chat_messages(raw_messages: Any) -> list[dict[str, Any]]:
+    """校验并归一化对话消息历史（幂等）。
+
+    契约规则：
+    1. messages 必须是非空列表，每项为字典，包含 role 与 content。
+    2. role 必须为 'user' 或 'assistant'。
+    3. assistant 消息：content 必须为非空字符串，不支持列表。
+    4. user 消息：
+       - content 可为非空字符串；
+       - 或非空 parts 列表，part 仅支持：
+         * {"type": "text", "text": "<非空字符串>"}
+         * {"type": "image_url", "image_url": {"url": "<data:image/jpeg|png|webp;base64,...> 或 http(s) URL>"}}
+         * data URL 的 base64 必须能解码，解码后单张不超过 8MB。
+    5. 图片数量上限：整段历史里最多保留最近 3 张图片；更早的图片 part 替换为
+       {"type": "text", "text": "[图片]"} 占位（保留轮次结构）。
+    6. 违反以上任何一条，抛出 ValueError（明确中文说明）。
+    """
+    if not isinstance(raw_messages, list) or len(raw_messages) == 0:
+        raise ValueError("messages 不能为空且必须为列表")
+
+    normalized: list[dict[str, Any]] = []
+    # 记录所有图片 part 在 normalized 中的位置: (msg_index, part_index)
+    image_positions: list[tuple[int, int]] = []
+
+    for idx, item in enumerate(raw_messages):
+        if not isinstance(item, dict):
+            raise ValueError(f"messages[{idx}] 必须为对象")
+
+        role = item.get("role")
+        if role not in ("user", "assistant"):
+            raise ValueError(f"messages[{idx}].role 必须为 user 或 assistant")
+
+        content = item.get("content")
+        if content is None:
+            raise ValueError(f"messages[{idx}].content 不能为空")
+
+        if role == "assistant":
+            if isinstance(content, list):
+                raise ValueError(f"messages[{idx}].content assistant 消息内容不能为列表，必须为非空字符串")
+            if not isinstance(content, str):
+                raise ValueError(f"messages[{idx}].content assistant 消息内容必须为字符串")
+            if not content.strip():
+                raise ValueError(f"messages[{idx}].content 不能为空字符串")
+            normalized.append({"role": "assistant", "content": content})
+
+        elif role == "user":
+            if isinstance(content, str):
+                if not content.strip():
+                    raise ValueError(f"messages[{idx}].content 不能为空字符串")
+                normalized.append({"role": "user", "content": content})
+            elif isinstance(content, list):
+                if len(content) == 0:
+                    raise ValueError(f"messages[{idx}].content 列表不能为空")
+                norm_parts: list[dict[str, Any]] = []
+                for p_idx, part in enumerate(content):
+                    if not isinstance(part, dict):
+                        raise ValueError(f"messages[{idx}].content[{p_idx}] 必须为对象")
+                    part_type = part.get("type")
+                    if not part_type or not isinstance(part_type, str):
+                        raise ValueError(f"messages[{idx}].content[{p_idx}] 缺少有效的 type 字段")
+
+                    if part_type == "text":
+                        text_val = part.get("text")
+                        if not isinstance(text_val, str) or not text_val.strip():
+                            raise ValueError(f"messages[{idx}].content[{p_idx}].text 必须为非空字符串")
+                        norm_parts.append({"type": "text", "text": text_val})
+
+                    elif part_type == "image_url":
+                        img_obj = part.get("image_url")
+                        if not isinstance(img_obj, dict):
+                            raise ValueError(f"messages[{idx}].content[{p_idx}] 缺少 image_url 对象")
+                        url_val = img_obj.get("url")
+                        if not isinstance(url_val, str) or not url_val.strip():
+                            raise ValueError(f"messages[{idx}].content[{p_idx}].image_url 缺少有效的 url 字段")
+
+                        url_clean = url_val.strip()
+                        if url_clean.startswith("http://") or url_clean.startswith("https://"):
+                            norm_parts.append({"type": "image_url", "image_url": {"url": url_clean}})
+                            image_positions.append((len(normalized), len(norm_parts) - 1))
+                        elif url_clean.lower().startswith("data:"):
+                            match = DATA_IMAGE_URL_PATTERN.match(url_clean)
+                            if not match:
+                                raise ValueError(
+                                    f"messages[{idx}].content[{p_idx}].image_url.url 图片 data URL 格式不合法，仅支持 jpeg/png/webp 格式"
+                                )
+                            b64_payload = match.group("b64").strip()
+                            try:
+                                img_bytes = base64.b64decode(b64_payload, validate=True)
+                            except Exception:
+                                raise ValueError(f"messages[{idx}].content[{p_idx}].image_url.url 图片 Base64 解码失败")
+                            if not img_bytes:
+                                raise ValueError(f"messages[{idx}].content[{p_idx}].image_url.url 图片 Base64 解码后数据为空")
+                            if len(img_bytes) > MAX_IMAGE_SIZE_BYTES:
+                                raise ValueError(f"messages[{idx}].content[{p_idx}].image_url.url 单张图片大小超过 8MB 限制")
+
+                            norm_parts.append({"type": "image_url", "image_url": {"url": url_clean}})
+                            image_positions.append((len(normalized), len(norm_parts) - 1))
+                        else:
+                            raise ValueError(
+                                f"messages[{idx}].content[{p_idx}].image_url.url 必须为 http(s) URL 或 data:image/(jpeg|png|webp);base64,... 格式"
+                            )
+                    else:
+                        raise ValueError(f"messages[{idx}].content[{p_idx}].type 不支持的类型 '{part_type}'，仅支持 text 或 image_url")
+
+                normalized.append({"role": "user", "content": norm_parts})
+            else:
+                raise ValueError(f"messages[{idx}].content 格式不合法，必须为非空字符串或列表")
+
+    # 执行“整段历史最多保留最近 3 张图片”替换
+    if len(image_positions) > MAX_CHAT_IMAGE_COUNT:
+        to_replace = image_positions[:-MAX_CHAT_IMAGE_COUNT]
+        for m_idx, p_idx in to_replace:
+            normalized[m_idx]["content"][p_idx] = {
+                "type": "text",
+                "text": "[图片]",
+            }
+
+    return normalized
 
 
 def _parse_listing_json(raw_text: str) -> dict[str, str]:
@@ -740,7 +868,7 @@ class AiProviderFailoverService:
         """根据历史对话消息进行追问回复（容灾轮询）
 
         Args:
-            messages: 对话历史消息列表，每项必须为 dict 且 role 为 user 或 assistant，content 非空。
+            messages: 对话历史消息列表，每项必须为 dict 且 role 为 user 或 assistant，content 遵循对话图片契约。
 
         Returns:
             dict: {reply, provider_used}
@@ -750,24 +878,7 @@ class AiProviderFailoverService:
             NoProviderConfiguredError: 未配置或未启用任何服务商（对应 503）。
             AllProvidersFailedError: 所有服务商均调用失败（对应 502）。
         """
-        if not isinstance(messages, list) or not messages:
-            raise ValueError("messages 必须是非空列表")
-
-        for idx, item in enumerate(messages):
-            if not isinstance(item, dict):
-                raise ValueError(f"messages[{idx}] 必须是字典")
-            role = item.get("role")
-            if role not in ("user", "assistant"):
-                raise ValueError(f"messages[{idx}].role 必须为 user 或 assistant")
-            content = item.get("content")
-            if content is None:
-                raise ValueError(f"messages[{idx}].content 不能为空")
-            if isinstance(content, str) and not content.strip():
-                raise ValueError(f"messages[{idx}].content 不能为空字符串")
-            if isinstance(content, list) and len(content) == 0:
-                raise ValueError(f"messages[{idx}].content 列表不能为空")
-            if not isinstance(content, (str, list)):
-                raise ValueError(f"messages[{idx}].content 必须是字符串或列表")
+        messages = _normalize_chat_messages(messages)
 
         stmt = (
             select(AiProviderConfig)
@@ -885,24 +996,7 @@ class AiProviderFailoverService:
         Yields:
             str: SSE 格式事件字符串
         """
-        if not isinstance(messages, list) or not messages:
-            raise ValueError("messages 必须是非空列表")
-
-        for idx, item in enumerate(messages):
-            if not isinstance(item, dict):
-                raise ValueError(f"messages[{idx}] 必须是字典")
-            role = item.get("role")
-            if role not in ("user", "assistant"):
-                raise ValueError(f"messages[{idx}].role 必须为 user 或 assistant")
-            content = item.get("content")
-            if content is None:
-                raise ValueError(f"messages[{idx}].content 不能为空")
-            if isinstance(content, str) and not content.strip():
-                raise ValueError(f"messages[{idx}].content 不能为空字符串")
-            if isinstance(content, list) and len(content) == 0:
-                raise ValueError(f"messages[{idx}].content 列表不能为空")
-            if not isinstance(content, (str, list)):
-                raise ValueError(f"messages[{idx}].content 必须是字符串或列表")
+        messages = _normalize_chat_messages(messages)
 
         if providers is None:
             providers = await self.get_enabled_providers()
