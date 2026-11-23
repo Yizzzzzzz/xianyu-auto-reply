@@ -13,7 +13,7 @@ from __future__ import annotations
 import base64
 from datetime import datetime
 import json
-from typing import Any, List, Optional
+from typing import Any, AsyncGenerator, List, Optional
 
 import httpx
 from sqlalchemy import select
@@ -723,6 +723,16 @@ class AiProviderFailoverService:
             errors=provider_errors,
         )
 
+    async def get_enabled_providers(self) -> list[AiProviderConfig]:
+        """查询所有已启用的服务商配置，按 priority 升序、id 升序排列"""
+        stmt = (
+            select(AiProviderConfig)
+            .where(AiProviderConfig.is_enabled == True)
+            .order_by(AiProviderConfig.priority.asc(), AiProviderConfig.id.asc())
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
     async def chat(
         self,
         messages: list[dict[str, Any]],
@@ -860,6 +870,163 @@ class AiProviderFailoverService:
             message="所有 AI 服务商均调用失败",
             errors=provider_errors,
         )
+
+    async def chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        providers: Optional[list[AiProviderConfig]] = None,
+    ) -> AsyncGenerator[str, None]:
+        """根据历史对话消息进行流式追问回复（SSE，走容灾调度）
+
+        Args:
+            messages: 对话历史消息列表。
+            providers: 可选已查询的启用服务商列表；若未提供则内部查询。
+
+        Yields:
+            str: SSE 格式事件字符串
+        """
+        if not isinstance(messages, list) or not messages:
+            raise ValueError("messages 必须是非空列表")
+
+        for idx, item in enumerate(messages):
+            if not isinstance(item, dict):
+                raise ValueError(f"messages[{idx}] 必须是字典")
+            role = item.get("role")
+            if role not in ("user", "assistant"):
+                raise ValueError(f"messages[{idx}].role 必须为 user 或 assistant")
+            content = item.get("content")
+            if content is None:
+                raise ValueError(f"messages[{idx}].content 不能为空")
+            if isinstance(content, str) and not content.strip():
+                raise ValueError(f"messages[{idx}].content 不能为空字符串")
+            if isinstance(content, list) and len(content) == 0:
+                raise ValueError(f"messages[{idx}].content 列表不能为空")
+            if not isinstance(content, (str, list)):
+                raise ValueError(f"messages[{idx}].content 必须是字符串或列表")
+
+        if providers is None:
+            providers = await self.get_enabled_providers()
+
+        if not providers:
+            raise NoProviderConfiguredError("未配置 AI 服务商，请先通过后端接口添加服务商")
+
+        full_messages = [{"role": "system", "content": CHAT_SYSTEM_PROMPT}] + messages
+        has_emitted_delta = False
+
+        for provider in providers:
+            plain_key = ""
+            try:
+                plain_key = decrypt_api_key(provider.api_key, self._get_encryption_key())
+            except Exception as exc:
+                err_msg = f"解密 API Key 失败: {str(exc)}"
+                provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                await self.session.commit()
+                continue
+
+            url = build_openai_url(provider.base_url, "chat/completions")
+            payload = {
+                "model": provider.model,
+                "messages": full_messages,
+                "temperature": 0.7,
+                "max_tokens": 4096,
+                "stream": True,
+            }
+            headers = {
+                "Authorization": f"Bearer {plain_key}",
+                "Content-Type": "application/json",
+            }
+            timeout_sec = float(provider.timeout_seconds or 30)
+
+            client_to_use = self._http_client
+            should_close = False
+            if client_to_use is None:
+                client_to_use = _create_async_client(timeout=timeout_sec)
+                should_close = True
+
+            try:
+                async with client_to_use.stream("POST", url, json=payload, headers=headers, timeout=timeout_sec) as resp:
+                    if not resp.is_success:
+                        err_bytes = await resp.aread()
+                        err_summary = err_bytes.decode("utf-8", errors="replace")
+                        if plain_key and plain_key in err_summary:
+                            err_summary = err_summary.replace(plain_key, "****")
+                        err_msg = f"HTTP {resp.status_code}: {err_summary}"
+                        provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                        await self.session.commit()
+                        if has_emitted_delta:
+                            error_data = json.dumps({"event": "error", "error": f"[{provider.name}] {err_msg}"}, ensure_ascii=False)
+                            yield f"event: error\ndata: {error_data}\n\n"
+                            return
+                        continue
+
+                    provider_emitted_in_this_turn = False
+                    async for raw_line in resp.aiter_lines():
+                        line = raw_line.strip()
+                        if not line:
+                            continue
+                        if line.startswith("data:"):
+                            data_str = line[5:].strip()
+                            if data_str == "[DONE]":
+                                break
+                            try:
+                                chunk = json.loads(data_str)
+                            except Exception:
+                                continue
+                            choices = chunk.get("choices")
+                            if not choices or not isinstance(choices, list):
+                                continue
+                            delta = choices[0].get("delta")
+                            if not delta or not isinstance(delta, dict):
+                                continue
+                            # 忽略 reasoning_content，只取 content
+                            content = delta.get("content")
+                            if not content or not isinstance(content, str):
+                                continue
+
+                            has_emitted_delta = True
+                            provider_emitted_in_this_turn = True
+                            delta_payload = json.dumps({"delta": content}, ensure_ascii=False)
+                            yield f"data: {delta_payload}\n\n"
+
+                    if provider_emitted_in_this_turn:
+                        provider.last_error = None
+                        provider.last_used_at = datetime.now()
+                        await self.session.commit()
+                        done_payload = json.dumps({"event": "done", "provider_used": provider.name}, ensure_ascii=False)
+                        yield f"event: done\ndata: {done_payload}\n\n"
+                        return
+                    else:
+                        err_msg = "返回消息正文为空"
+                        provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                        await self.session.commit()
+                        continue
+
+            except httpx.TimeoutException:
+                err_msg = f"请求超时（{int(timeout_sec)}秒）"
+                provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                await self.session.commit()
+                if has_emitted_delta:
+                    error_data = json.dumps({"event": "error", "error": f"[{provider.name}] {err_msg}"}, ensure_ascii=False)
+                    yield f"event: error\ndata: {error_data}\n\n"
+                    return
+                continue
+            except Exception as exc:
+                err_msg = f"调用异常: {type(exc).__name__}: {str(exc)}"
+                if plain_key and plain_key in err_msg:
+                    err_msg = err_msg.replace(plain_key, "****")
+                provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                await self.session.commit()
+                if has_emitted_delta:
+                    error_data = json.dumps({"event": "error", "error": f"[{provider.name}] {err_msg}"}, ensure_ascii=False)
+                    yield f"event: error\ndata: {error_data}\n\n"
+                    return
+                continue
+            finally:
+                if should_close:
+                    await client_to_use.aclose()
+
+        all_failed_payload = json.dumps({"event": "error", "error": "所有 AI 服务商均调用失败"}, ensure_ascii=False)
+        yield f"event: error\ndata: {all_failed_payload}\n\n"
 
     async def generate_image(self, prompt: str) -> dict[str, str]:
         """根据画面描述生成图片（容灾轮询）
