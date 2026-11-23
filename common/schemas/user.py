@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from common.models.user import UserRole, UserStatus
 from common.schemas.common import TimestampSchema
@@ -36,6 +36,15 @@ class UserUpdate(BaseModel):
     # 角色、状态等只能由管理员通过 AdminUserUpdate 修改。
     email: Optional[EmailStr] = None
     phone: Optional[str] = Field(default=None, max_length=32)
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def _normalize_email(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
 
 
 class AdminUserUpdate(BaseModel):

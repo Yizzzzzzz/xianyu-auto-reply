@@ -1,3 +1,4 @@
+import re
 import secrets
 import string
 
@@ -32,6 +33,57 @@ class ChangePasswordRequest(BaseModel):
 
 @router.get("/me", response_model=UserPublic)
 async def read_current_user(current_user: User = Depends(deps.get_current_active_user)) -> UserPublic:
+    return UserPublic.model_validate(current_user)
+
+
+@router.put("/me", response_model=UserPublic)
+async def update_current_user(
+    payload: UserUpdate,
+    current_user: User = Depends(deps.get_current_active_user),
+    user_service: UserService = Depends(deps.get_user_service),
+    session: AsyncSession = Depends(deps.get_db_session),
+) -> UserPublic:
+    """更新当前用户的手机号或邮箱（自助更新）"""
+    update_data = payload.model_dump(exclude_unset=True)
+
+    if "phone" in update_data:
+        phone_val = payload.phone
+        if phone_val is not None:
+            phone_val = str(phone_val).strip()
+            if not phone_val:
+                phone_val = None
+            elif not re.match(r"^1[3-9]\d{9}$", phone_val):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="手机号格式不正确",
+                )
+        if phone_val:
+            existing_phone = await user_service.get_by_phone(phone_val)
+            if existing_phone and existing_phone.id != current_user.id:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="当前手机号已经注册",
+                )
+        current_user.phone = phone_val
+
+    if "email" in update_data:
+        email_val = payload.email
+        if email_val is not None:
+            email_val = str(email_val).strip().lower()
+            if not email_val:
+                email_val = None
+        if email_val:
+            existing_email = await user_service.get_by_email(email_val)
+            if existing_email and existing_email.id != current_user.id:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="当前邮箱已经注册",
+                )
+        current_user.email = email_val
+
+    session.add(current_user)
+    await session.commit()
+    await session.refresh(current_user)
     return UserPublic.model_validate(current_user)
 
 
