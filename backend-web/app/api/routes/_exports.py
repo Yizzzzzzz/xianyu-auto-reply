@@ -18,6 +18,7 @@ from . import (
     ai_listing,
     ai_providers,
     announcements,
+    app_update,
     auto_reply_logs,
     auth,
     auto_rate,
@@ -223,6 +224,9 @@ api_router.include_router(chat_quick_phrase.router, tags=["在线聊天(新)快�
 api_router.include_router(chat_customer_order.router, tags=["在线聊天(新)客户订单"])  # 已定义prefix="/chat-new"
 # 版本检测（公开接口，无需登录即可查询版本信息）
 api_router.include_router(version.router, tags=["版本检测"])  # 已定义prefix="/version"
+
+# App OTA 更新（公开接口，Flutter 安卓端自托管更新）
+api_router.include_router(app_update.router, tags=["App 更新"])  # 已定义prefix="/app"
 
 # 在线安装（公开入口，无需登录，按访客会话隔离安装任务和日志）
 api_router.include_router(online_install.router, tags=["在线安装"])
