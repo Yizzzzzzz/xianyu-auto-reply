@@ -890,7 +890,7 @@ class TestAiProviderFailover(unittest.IsolatedAsyncioTestCase):
     # ==================== 13.1 对话追问流式 chat_stream 测试 ====================
 
     async def test_chat_stream_incremental_deltas_and_done(self) -> None:
-        """测试 chat_stream 正常接收多段增量、忽略 reasoning_content、发 done 事件并记录状态"""
+        """测试 chat_stream 正常接收多段增量、转发 reasoning_content 为 thinking 事件、发 done 事件并记录状态"""
         stream_body = (
             'data: {"choices": [{"delta": {"reasoning_content": "thinking...", "content": ""}}]}\n\n'
             'data: {"choices": [{"delta": {"content": "这是"}}]}\n\n'
@@ -905,11 +905,90 @@ class TestAiProviderFailover(unittest.IsolatedAsyncioTestCase):
             e async for e in service.chat_stream([{"role": "user", "content": "这是什么"}])
         ]
 
+        self.assertEqual(len(events), 4)
+        self.assertEqual(events[0], 'event: thinking\ndata: {"thinking": "thinking..."}\n\n')
+        self.assertEqual(events[1], 'data: {"delta": "这是"}\n\n')
+        self.assertEqual(events[2], 'data: {"delta": "一款机械键盘。"}\n\n')
+        self.assertIn("event: done", events[3])
+        self.assertIn('"provider_used": "Provider 1"', events[3])
+
+        await self.session.refresh(p1)
+        self.assertIsNone(p1.last_error)
+        self.assertIsNotNone(p1.last_used_at)
+
+    async def test_chat_stream_consecutive_reasoning_only_chunks(self) -> None:
+        """测试 reasoning_content-only 的 chunk 连续下发时按顺序发出多个 thinking 事件，之后正文 delta 正常发出，最后有 done 事件"""
+        stream_body = (
+            'data: {"choices": [{"delta": {"reasoning_content": "思考步骤一：识别主体。"}}]}\n\n'
+            'data: {"choices": [{"delta": {"reasoning_content": "思考步骤二：分析成色。"}}]}\n\n'
+            'data: {"choices": [{"delta": {"content": "这是一款九成新机械键盘。"}}]}\n\n'
+            'data: [DONE]\n\n'
+        )
+        self.mock_server.set_stream_route("/p1/chat/completions", 200, stream_body)
+        p1 = await self._add_provider(name="Provider 1", path="/p1", priority=10)
+
+        service = AiProviderFailoverService(session=self.session, fernet_key=self.fernet_key)
+        events = [
+            e async for e in service.chat_stream([{"role": "user", "content": "请评价商品"}])
+        ]
+
+        self.assertEqual(len(events), 4)
+        self.assertEqual(events[0], 'event: thinking\ndata: {"thinking": "思考步骤一：识别主体。"}\n\n')
+        self.assertEqual(events[1], 'event: thinking\ndata: {"thinking": "思考步骤二：分析成色。"}\n\n')
+        self.assertEqual(events[2], 'data: {"delta": "这是一款九成新机械键盘。"}\n\n')
+        self.assertIn("event: done", events[3])
+        self.assertIn('"provider_used": "Provider 1"', events[3])
+
+        await self.session.refresh(p1)
+        self.assertIsNone(p1.last_error)
+        self.assertIsNotNone(p1.last_used_at)
+
+    async def test_chat_stream_same_delta_reasoning_and_content(self) -> None:
+        """测试同一个 delta 同时含 reasoning_content 和 content 时，先收到 thinking 事件再收到 delta 事件"""
+        stream_body = (
+            'data: {"choices": [{"delta": {"reasoning_content": "完成推理分析", "content": "成色很新。"}}]}\n\n'
+            'data: [DONE]\n\n'
+        )
+        self.mock_server.set_stream_route("/p1/chat/completions", 200, stream_body)
+        p1 = await self._add_provider(name="Provider 1", path="/p1", priority=10)
+
+        service = AiProviderFailoverService(session=self.session, fernet_key=self.fernet_key)
+        events = [
+            e async for e in service.chat_stream([{"role": "user", "content": "成色如何"}])
+        ]
+
         self.assertEqual(len(events), 3)
-        self.assertEqual(events[0], 'data: {"delta": "这是"}\n\n')
-        self.assertEqual(events[1], 'data: {"delta": "一款机械键盘。"}\n\n')
+        self.assertEqual(events[0], 'event: thinking\ndata: {"thinking": "完成推理分析"}\n\n')
+        self.assertEqual(events[1], 'data: {"delta": "成色很新。"}\n\n')
         self.assertIn("event: done", events[2])
         self.assertIn('"provider_used": "Provider 1"', events[2])
+
+        await self.session.refresh(p1)
+        self.assertIsNone(p1.last_error)
+        self.assertIsNotNone(p1.last_used_at)
+
+    async def test_chat_stream_no_reasoning_content_emits_no_thinking_events(self) -> None:
+        """测试流里没有任何 reasoning_content 时不发出任何 thinking 事件"""
+        stream_body = (
+            'data: {"choices": [{"delta": {"content": "你好！"}}]}\n\n'
+            'data: {"choices": [{"delta": {"content": "有什么可以帮您的？"}}]}\n\n'
+            'data: [DONE]\n\n'
+        )
+        self.mock_server.set_stream_route("/p1/chat/completions", 200, stream_body)
+        p1 = await self._add_provider(name="Provider 1", path="/p1", priority=10)
+
+        service = AiProviderFailoverService(session=self.session, fernet_key=self.fernet_key)
+        events = [
+            e async for e in service.chat_stream([{"role": "user", "content": "你好"}])
+        ]
+
+        self.assertEqual(len(events), 3)
+        self.assertEqual(events[0], 'data: {"delta": "你好！"}\n\n')
+        self.assertEqual(events[1], 'data: {"delta": "有什么可以帮您的？"}\n\n')
+        self.assertIn("event: done", events[2])
+        for event in events:
+            self.assertNotIn("event: thinking", event)
+            self.assertNotIn('"thinking"', event)
 
         await self.session.refresh(p1)
         self.assertIsNone(p1.last_error)
