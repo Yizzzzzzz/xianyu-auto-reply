@@ -37,6 +37,7 @@ from app.services.ai_provider_failover_service import (
     PICK_PROMPT,
     PICK_PROMPT_KEY,
     NoProviderConfiguredError,
+    _normalize_chat_messages,
 )
 from common.models.ai_provider_config import AiProviderConfig
 from common.models.system_setting import SystemSetting
@@ -844,7 +845,14 @@ async def chat_endpoint(
 
     入参 application/json：
     - messages: 对话历史消息列表，每项为 {"role": "user"|"assistant", "content": ...}。
-      第一条可含 OpenAI vision 格式的多模态内容列表，后续为文字追问。
+      契约规则：
+      1. assistant 消息：content 必须为非空字符串，不支持列表。
+      2. user 消息：content 可以是非空字符串，也可以是非空 parts 列表。part 支持两种类型：
+         - {"type": "text", "text": "<非空字符串>"}
+         - {"type": "image_url", "image_url": {"url": "<data:image/jpeg|png|webp;base64,...> 或 http(s) URL>"}}
+           data URL 的 base64 必须能正常解码，且解码后单张图片不超过 8MB。
+      3. 图片数量上限：整段历史中最多保留最近 3 张图片；更早的图片 part 自动替换为 {"type": "text", "text": "[图片]"} 占位（保留轮次结构）。
+      4. 违反以上任何规则，接口直接返回 400（明确中文原因）。
 
     返回值：
     - 200: {reply, provider_used}
@@ -861,31 +869,14 @@ async def chat_endpoint(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="无效的 JSON 请求体")
 
     raw_messages = body.get("messages")
-    if not isinstance(raw_messages, list) or not raw_messages:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="messages 不能为空且必须为列表")
-
-    for idx, item in enumerate(raw_messages):
-        if not isinstance(item, dict):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"messages[{idx}] 必须为对象")
-        role = item.get("role")
-        if role not in ("user", "assistant"):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"messages[{idx}].role 必须为 user 或 assistant",
-            )
-        content = item.get("content")
-        if content is None:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"messages[{idx}].content 不能为空")
-        if isinstance(content, str) and not content.strip():
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"messages[{idx}].content 不能为空字符串")
-        if isinstance(content, list) and len(content) == 0:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"messages[{idx}].content 列表不能为空")
-        if not isinstance(content, (str, list)):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"messages[{idx}].content 格式不合法")
+    try:
+        normalized_messages = _normalize_chat_messages(raw_messages)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
     service = AiProviderFailoverService(session=session)
     try:
-        result = await service.chat(messages=raw_messages)
+        result = await service.chat(messages=normalized_messages)
         return result
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
@@ -908,7 +899,14 @@ async def chat_stream_endpoint(
 
     入参 application/json：
     - messages: 对话历史消息列表，每项为 {"role": "user"|"assistant", "content": ...}。
-      第一条可含 OpenAI vision 格式的多模态内容列表，后续为文字追问。
+      契约规则：
+      1. assistant 消息：content 必须为非空字符串，不支持列表。
+      2. user 消息：content 可以是非空字符串，也可以是非空 parts 列表。part 支持两种类型：
+         - {"type": "text", "text": "<非空字符串>"}
+         - {"type": "image_url", "image_url": {"url": "<data:image/jpeg|png|webp;base64,...> 或 http(s) URL>"}}
+           data URL 的 base64 必须能正常解码，且解码后单张图片不超过 8MB。
+      3. 图片数量上限：整段历史中最多保留最近 3 张图片；更早的图片 part 自动替换为 {"type": "text", "text": "[图片]"} 占位（保留轮次结构）。
+      4. 违反以上任何规则，接口直接返回 400（明确中文原因）。
 
     返回值：
     - 200: text/event-stream 流式响应（SSE 事件：delta 增量、done 结束、error 异常）
@@ -924,27 +922,10 @@ async def chat_stream_endpoint(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="无效的 JSON 请求体")
 
     raw_messages = body.get("messages")
-    if not isinstance(raw_messages, list) or not raw_messages:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="messages 不能为空且必须为列表")
-
-    for idx, item in enumerate(raw_messages):
-        if not isinstance(item, dict):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"messages[{idx}] 必须为对象")
-        role = item.get("role")
-        if role not in ("user", "assistant"):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"messages[{idx}].role 必须为 user 或 assistant",
-            )
-        content = item.get("content")
-        if content is None:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"messages[{idx}].content 不能为空")
-        if isinstance(content, str) and not content.strip():
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"messages[{idx}].content 不能为空字符串")
-        if isinstance(content, list) and len(content) == 0:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"messages[{idx}].content 列表不能为空")
-        if not isinstance(content, (str, list)):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"messages[{idx}].content 格式不合法")
+    try:
+        normalized_messages = _normalize_chat_messages(raw_messages)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
     service = AiProviderFailoverService(session=session)
     providers = await service.get_enabled_providers()
@@ -955,7 +936,7 @@ async def chat_stream_endpoint(
         )
 
     return StreamingResponse(
-        service.chat_stream(messages=raw_messages, providers=providers),
+        service.chat_stream(messages=normalized_messages, providers=providers),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
