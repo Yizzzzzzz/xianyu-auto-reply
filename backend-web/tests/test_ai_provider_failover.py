@@ -20,6 +20,7 @@ from __future__ import annotations
 import base64
 from datetime import datetime
 import http.server
+import httpx
 import json
 import sys
 import threading
@@ -72,6 +73,7 @@ class MockHttpServer:
 
     def __init__(self) -> None:
         self.routes: dict[str, tuple[int, dict]] = {}
+        self.stream_routes: dict[str, tuple[int, str]] = {}
         self.request_counts: dict[str, int] = {}
         self.received_auth_headers: dict[str, str] = {}
         self.received_bodies: dict[str, bytes] = {}
@@ -81,6 +83,9 @@ class MockHttpServer:
 
     def set_route(self, path: str, status_code: int, response_data: dict) -> None:
         self.routes[path] = (status_code, response_data)
+
+    def set_stream_route(self, path: str, status_code: int, sse_text: str) -> None:
+        self.stream_routes[path] = (status_code, sse_text)
 
     def start(self) -> None:
         outer = self
@@ -94,6 +99,15 @@ class MockHttpServer:
                 outer.request_counts[path] = outer.request_counts.get(path, 0) + 1
                 outer.received_auth_headers[path] = auth
                 outer.received_bodies[path] = body
+
+                if path in outer.stream_routes:
+                    status_code, sse_text = outer.stream_routes[path]
+                    self.send_response(status_code)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Cache-Control", "no-cache")
+                    self.end_headers()
+                    self.wfile.write(sse_text.encode("utf-8"))
+                    return
 
                 if path in outer.routes:
                     status_code, data = outer.routes[path]
@@ -110,6 +124,15 @@ class MockHttpServer:
                 path = self.path
                 outer.request_counts[path] = outer.request_counts.get(path, 0) + 1
                 outer.received_auth_headers[path] = auth
+
+                if path in outer.stream_routes:
+                    status_code, sse_text = outer.stream_routes[path]
+                    self.send_response(status_code)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Cache-Control", "no-cache")
+                    self.end_headers()
+                    self.wfile.write(sse_text.encode("utf-8"))
+                    return
 
                 if path in outer.routes:
                     status_code, data = outer.routes[path]
@@ -863,6 +886,131 @@ class TestAiProviderFailover(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(NoProviderConfiguredError) as ctx:
             await service.chat([{"role": "user", "content": "你好"}])
         self.assertIn("未配置 AI 服务商，请先通过后端接口添加服务商", str(ctx.exception))
+
+    # ==================== 13.1 对话追问流式 chat_stream 测试 ====================
+
+    async def test_chat_stream_incremental_deltas_and_done(self) -> None:
+        """测试 chat_stream 正常接收多段增量、忽略 reasoning_content、发 done 事件并记录状态"""
+        stream_body = (
+            'data: {"choices": [{"delta": {"reasoning_content": "thinking...", "content": ""}}]}\n\n'
+            'data: {"choices": [{"delta": {"content": "这是"}}]}\n\n'
+            'data: {"choices": [{"delta": {"content": "一款机械键盘。"}}]}\n\n'
+            'data: [DONE]\n\n'
+        )
+        self.mock_server.set_stream_route("/p1/chat/completions", 200, stream_body)
+        p1 = await self._add_provider(name="Provider 1", path="/p1", priority=10)
+
+        service = AiProviderFailoverService(session=self.session, fernet_key=self.fernet_key)
+        events = [
+            e async for e in service.chat_stream([{"role": "user", "content": "这是什么"}])
+        ]
+
+        self.assertEqual(len(events), 3)
+        self.assertEqual(events[0], 'data: {"delta": "这是"}\n\n')
+        self.assertEqual(events[1], 'data: {"delta": "一款机械键盘。"}\n\n')
+        self.assertIn("event: done", events[2])
+        self.assertIn('"provider_used": "Provider 1"', events[2])
+
+        await self.session.refresh(p1)
+        self.assertIsNone(p1.last_error)
+        self.assertIsNotNone(p1.last_used_at)
+
+    async def test_chat_stream_first_fails_second_succeeds(self) -> None:
+        """测试第一家服务商 500 且无增量时，自动轮询切到第二家服务商成功流式返回"""
+        self.mock_server.set_route(
+            "/p1/chat/completions", 500, {"error": {"message": "Internal Server Error"}}
+        )
+        stream_body_p2 = (
+            'data: {"choices": [{"delta": {"content": "第二家回复成功"}}]}\n\n'
+            'data: [DONE]\n\n'
+        )
+        self.mock_server.set_stream_route("/p2/chat/completions", 200, stream_body_p2)
+        p1 = await self._add_provider(name="Provider 1", path="/p1", priority=10)
+        p2 = await self._add_provider(name="Provider 2", path="/p2", priority=20)
+
+        service = AiProviderFailoverService(session=self.session, fernet_key=self.fernet_key)
+        events = [
+            e async for e in service.chat_stream([{"role": "user", "content": "你好"}])
+        ]
+
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0], 'data: {"delta": "第二家回复成功"}\n\n')
+        self.assertIn("event: done", events[1])
+        self.assertIn('"provider_used": "Provider 2"', events[1])
+
+        await self.session.refresh(p1)
+        await self.session.refresh(p2)
+        self.assertIsNotNone(p1.last_error)
+        self.assertIn("HTTP 500", p1.last_error)
+        self.assertIsNone(p2.last_error)
+        self.assertIsNotNone(p2.last_used_at)
+
+    async def test_chat_stream_all_providers_failed_emits_error_event(self) -> None:
+        """测试所有服务商均调用失败且无增量时，发出 error 事件结束"""
+        self.mock_server.set_route("/p1/chat/completions", 500, {"error": "down"})
+        self.mock_server.set_route("/p2/chat/completions", 429, {"error": "rate limit"})
+        p1 = await self._add_provider(name="Provider 1", path="/p1", priority=10)
+        p2 = await self._add_provider(name="Provider 2", path="/p2", priority=20)
+
+        service = AiProviderFailoverService(session=self.session, fernet_key=self.fernet_key)
+        events = [
+            e async for e in service.chat_stream([{"role": "user", "content": "你好"}])
+        ]
+
+        self.assertEqual(len(events), 1)
+        self.assertIn("event: error", events[0])
+        self.assertIn("所有 AI 服务商均调用失败", events[0])
+
+    async def test_chat_stream_no_provider_raises_503(self) -> None:
+        """测试无可用服务商时直接抛出 NoProviderConfiguredError（端点层返回 503 JSON，不建流）"""
+        service = AiProviderFailoverService(session=self.session, fernet_key=self.fernet_key)
+        with self.assertRaises(NoProviderConfiguredError) as ctx:
+            async for _ in service.chat_stream([{"role": "user", "content": "你好"}]):
+                pass
+        self.assertIn("未配置 AI 服务商，请先通过后端接口添加服务商", str(ctx.exception))
+
+    async def test_chat_stream_midway_failure_after_delta_emits_error_event(self) -> None:
+        """测试已发过增量后中途失败，发 error 事件（带真实失败原因）后结束流，不静默断流"""
+        class MockFailingStreamClient:
+            def stream(self, *args, **kwargs):
+                class CM:
+                    async def __aenter__(self):
+                        class Resp:
+                            is_success = True
+                            status_code = 200
+                            async def aiter_lines(self):
+                                yield 'data: {"choices": [{"delta": {"content": "前半句"}}]}'
+                                raise RuntimeError("网络传输中断")
+                        return Resp()
+                    async def __aexit__(self, *args):
+                        pass
+                return CM()
+
+        p1 = await self._add_provider(name="Provider 1", path="/p1", priority=10)
+        service = AiProviderFailoverService(
+            session=self.session,
+            fernet_key=self.fernet_key,
+            http_client=MockFailingStreamClient(),
+        )
+        events = [
+            e async for e in service.chat_stream([{"role": "user", "content": "你好"}])
+        ]
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0], 'data: {"delta": "前半句"}\n\n')
+        self.assertIn("event: error", events[1])
+        self.assertIn("网络传输中断", events[1])
+        self.assertIn("Provider 1", events[1])
+
+    async def test_chat_stream_endpoint_no_providers_503(self) -> None:
+        """测试 chat_stream_endpoint 无服务商时直接抛出 503 HTTPException，不建流"""
+        from app.api.routes.ai_providers import chat_stream_endpoint
+        from unittest.mock import AsyncMock
+        req = MagicMock()
+        req.json = AsyncMock(return_value={"messages": [{"role": "user", "content": "你好"}]})
+        with self.assertRaises(HTTPException) as ctx:
+            await chat_stream_endpoint(req, None, self.session)
+        self.assertEqual(ctx.exception.status_code, 503)
+        self.assertIn("未配置 AI 服务商", str(ctx.exception.detail))
 
     # ==================== 14. 绘画 generate_image 测试 ====================
 

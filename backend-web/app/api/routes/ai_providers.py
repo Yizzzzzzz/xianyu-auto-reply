@@ -13,6 +13,7 @@ from typing import Any, List, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -895,6 +896,73 @@ async def chat_endpoint(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail={"message": str(exc), "errors": exc.errors},
         )
+
+
+@router.post("/chat/stream")
+async def chat_stream_endpoint(
+    request: Request,
+    _: User = Depends(get_current_admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> StreamingResponse:
+    """多轮对话追问流式接口（走 SSE，容灾调度）
+
+    入参 application/json：
+    - messages: 对话历史消息列表，每项为 {"role": "user"|"assistant", "content": ...}。
+      第一条可含 OpenAI vision 格式的多模态内容列表，后续为文字追问。
+
+    返回值：
+    - 200: text/event-stream 流式响应（SSE 事件：delta 增量、done 结束、error 异常）
+    - 400: 入参不合法或格式错误
+    - 503: 未配置或未启用任何 AI 服务商（直接返回 503 JSON，不建流）
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="无效的 JSON 请求体")
+
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="无效的 JSON 请求体")
+
+    raw_messages = body.get("messages")
+    if not isinstance(raw_messages, list) or not raw_messages:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="messages 不能为空且必须为列表")
+
+    for idx, item in enumerate(raw_messages):
+        if not isinstance(item, dict):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"messages[{idx}] 必须为对象")
+        role = item.get("role")
+        if role not in ("user", "assistant"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"messages[{idx}].role 必须为 user 或 assistant",
+            )
+        content = item.get("content")
+        if content is None:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"messages[{idx}].content 不能为空")
+        if isinstance(content, str) and not content.strip():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"messages[{idx}].content 不能为空字符串")
+        if isinstance(content, list) and len(content) == 0:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"messages[{idx}].content 列表不能为空")
+        if not isinstance(content, (str, list)):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"messages[{idx}].content 格式不合法")
+
+    service = AiProviderFailoverService(session=session)
+    providers = await service.get_enabled_providers()
+    if not providers:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="未配置 AI 服务商，请先通过后端接口添加服务商",
+        )
+
+    return StreamingResponse(
+        service.chat_stream(messages=raw_messages, providers=providers),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/images/generate", response_model=GenerateImageResponse)
