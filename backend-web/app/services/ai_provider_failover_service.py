@@ -1072,15 +1072,20 @@ class AiProviderFailoverService:
                             delta = choices[0].get("delta")
                             if not delta or not isinstance(delta, dict):
                                 continue
-                            # 忽略 reasoning_content，只取 content
-                            content = delta.get("content")
-                            if not content or not isinstance(content, str):
-                                continue
 
-                            has_emitted_delta = True
-                            provider_emitted_in_this_turn = True
-                            delta_payload = json.dumps({"delta": content}, ensure_ascii=False)
-                            yield f"data: {delta_payload}\n\n"
+                            # 1. 优先提取并转发思考过程 reasoning_content
+                            reasoning = delta.get("reasoning_content")
+                            if isinstance(reasoning, str) and reasoning:
+                                thinking_payload = json.dumps({"thinking": reasoning}, ensure_ascii=False)
+                                yield f"event: thinking\ndata: {thinking_payload}\n\n"
+
+                            # 2. 提取正文增量 content
+                            content = delta.get("content")
+                            if isinstance(content, str) and content:
+                                has_emitted_delta = True
+                                provider_emitted_in_this_turn = True
+                                delta_payload = json.dumps({"delta": content}, ensure_ascii=False)
+                                yield f"data: {delta_payload}\n\n"
 
                     if provider_emitted_in_this_turn:
                         provider.last_error = None

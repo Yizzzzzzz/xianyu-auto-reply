@@ -909,7 +909,12 @@ async def chat_stream_endpoint(
       4. 违反以上任何规则，接口直接返回 400（明确中文原因）。
 
     返回值：
-    - 200: text/event-stream 流式响应（SSE 事件：delta 增量、done 结束、error 异常）
+    - 200: text/event-stream 流式响应（SSE 事件：thinking 思考、delta 增量、done 结束、error 异常）
+      SSE 事件说明：
+      - thinking: 思考过程增量（转发服务商 delta.reasoning_content），格式：`event: thinking\ndata: {"thinking": "<原文>"}\n\n`
+      - delta: 正文增量回复，格式：`data: {"delta": "<内容>"}\n\n`
+      - done: 成功完成，格式：`event: done\ndata: {"event": "done", "provider_used": "<服务商名称>"}\n\n`
+      - error: 异常错误，格式：`event: error\ndata: {"event": "error", "error": "<错误描述>"}\n\n`
     - 400: 入参不合法或格式错误
     - 503: 未配置或未启用任何 AI 服务商（直接返回 503 JSON，不建流）
     """
