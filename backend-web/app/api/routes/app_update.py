@@ -9,8 +9,10 @@
   无已发布版本 / 版本信息有问题时返回 ``success=False`` + 中文原因，
   App 端静默处理（自动检查不打扰用户，手动检查弹 toast）。
 - ``GET /api/v1/app/download/{filename}``：下载 APK 文件。
-  文件不存在时返回 HTTP 404（而不是 200 的 JSON，避免下载器把错误
-  文本存成 .apk 后校验失败、报错信息误导）。
+  文件不存在时返回真实的 HTTP 404（直接返回 ``Response``，而不抛
+  ``HTTPException``——全局异常处理器会把抛出的 HTTP 异常统一包成
+  HTTP 200 的 ApiResponse，下载器会把那段 JSON 当成 APK 存下来，
+  再因校验失败报错，提示信息就误导了）。
 
 响应统一用 ``ApiResponse``（``success/message/data``），与其它接口一致。
 ``data`` 字段：
@@ -32,8 +34,8 @@
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Request
+from fastapi.responses import FileResponse, Response
 
 from app.services.app_update_service import (
     read_latest_release,
@@ -76,7 +78,13 @@ async def download_app_apk(filename: str):
     """下载 APK 安装包（公开接口，无需登录）。"""
     path = resolve_release_file(filename)
     if path is None:
-        raise HTTPException(status_code=404, detail="安装包不存在")
+        # 直接返回 404 Response，不抛 HTTPException：全局异常处理器会把
+        # 抛出的 HTTP 异常统一包成 HTTP 200 的 ApiResponse。
+        return Response(
+            content='{"detail": "安装包不存在"}',
+            status_code=404,
+            media_type="application/json",
+        )
     return FileResponse(
         path,
         media_type="application/vnd.android.package-archive",
