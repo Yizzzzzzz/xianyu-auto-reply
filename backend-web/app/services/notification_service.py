@@ -86,35 +86,40 @@ class MessageNotificationService:
             for item in result.scalars().all()
         ]
 
-    async def list_notifications(self, owner_id: int) -> dict[str, list[dict[str, Any]]]:
+    async def list_notifications(self, owner_id: int | None) -> dict[str, list[dict[str, Any]]]:
         rows = await self._query_notifications(owner_id)
         return self._aggregate(rows)
 
     async def list_notification_page(
         self,
-        owner_id: int,
+        owner_id: int | None,
         page: int,
         page_size: int,
     ) -> dict[str, Any]:
         """分页查询当前用户的消息通知绑定。
 
         Args:
-            owner_id: 当前用户ID。
+            owner_id: 当前用户ID；None 表示管理员（看全部）。
             page: 页码，从1开始。
             page_size: 每页条数。
         Returns:
             包含列表、总数和页码信息的分页数据。
         """
+        owner_conditions = []
+        if owner_id is not None:
+            owner_conditions = [
+                MessageNotification.owner_id == owner_id,
+                NotificationChannel.owner_id == owner_id,
+                XYAccount.owner_id == owner_id,
+            ]
         base_stmt = (
             select(MessageNotification, NotificationChannel, XYAccount.account_id)
             .join(NotificationChannel, NotificationChannel.id == MessageNotification.channel_id)
             .join(XYAccount, XYAccount.id == MessageNotification.account_pk)
             .where(
-                MessageNotification.owner_id == owner_id,
+                *owner_conditions,
                 MessageNotification.is_deleted.is_(False),
                 NotificationChannel.is_deleted.is_(False),
-                NotificationChannel.owner_id == owner_id,
-                XYAccount.owner_id == owner_id,
             )
         )
         total_stmt = select(func.count()).select_from(base_stmt.subquery())
@@ -137,7 +142,7 @@ class MessageNotificationService:
             "pages": pages,
         }
 
-    async def list_for_account(self, owner_id: int, account_identifier: str) -> list[dict[str, Any]]:
+    async def list_for_account(self, owner_id: int | None, account_identifier: str) -> list[dict[str, Any]]:
         account = await self.account_service.get_account_for_user(owner_id, account_identifier)
         if not account:
             return []
@@ -147,7 +152,7 @@ class MessageNotificationService:
 
     async def set_notification(
         self,
-        owner_id: int,
+        owner_id: int | None,
         account_identifier: str,
         payload: MessageNotificationSet,
     ) -> bool:
@@ -155,6 +160,9 @@ class MessageNotificationService:
         account = await self.account_service.get_account_for_user(owner_id, account_identifier)
         if not account:
             return False
+        # 绑定归属跟账号走：管理员代操作时，订阅行落到账号归属人名下
+        # （owner_id 为 None 时不能直接写入订阅表，须用账号的 owner_id）
+        owner_id = account.owner_id
         # 同一账号串行写入；锁定读可看到等待期间提交的绑定，无需中途提交事务。
         account = (await self.session.execute(
             select(XYAccount)
@@ -223,7 +231,7 @@ class MessageNotificationService:
 
     async def update_subscription_enabled(
         self,
-        owner_id: int,
+        owner_id: int | None,
         notification_id: int,
         enabled: bool,
     ) -> bool:
@@ -236,11 +244,13 @@ class MessageNotificationService:
         Returns:
             找到并更新返回True，否则返回False。
         """
-        stmt = select(MessageNotification).where(
-            MessageNotification.owner_id == owner_id,
+        conditions = [
             MessageNotification.id == notification_id,
             MessageNotification.is_deleted.is_(False),
-        )
+        ]
+        if owner_id is not None:
+            conditions.insert(0, MessageNotification.owner_id == owner_id)
+        stmt = select(MessageNotification).where(*conditions)
         subscription = (await self.session.execute(
             stmt.with_for_update().execution_options(populate_existing=True)
         )).scalars().first()
@@ -251,12 +261,14 @@ class MessageNotificationService:
         await self.session.commit()
         return True
 
-    async def delete_subscription(self, owner_id: int, notification_id: int) -> bool:
-        stmt = select(MessageNotification).where(
-            MessageNotification.owner_id == owner_id,
+    async def delete_subscription(self, owner_id: int | None, notification_id: int) -> bool:
+        conditions = [
             MessageNotification.id == notification_id,
             MessageNotification.is_deleted.is_(False),
-        )
+        ]
+        if owner_id is not None:
+            conditions.insert(0, MessageNotification.owner_id == owner_id)
+        stmt = select(MessageNotification).where(*conditions)
         result = await self.session.execute(stmt.with_for_update().execution_options(populate_existing=True))
         subscription = result.scalars().first()
         if not subscription:
@@ -267,10 +279,12 @@ class MessageNotificationService:
         await self.session.commit()
         return True
 
-    async def delete_for_account(self, owner_id: int, account_identifier: str) -> bool:
+    async def delete_for_account(self, owner_id: int | None, account_identifier: str) -> bool:
         account = await self.account_service.get_account_for_user(owner_id, account_identifier)
         if not account:
             return False
+        # 清理归属跟账号走：管理员代操作时按账号归属人清理
+        owner_id = account.owner_id
         # 与添加绑定共用账号行锁，避免删除账号绑定时漏掉同时创建的记录。
         account_pk = await self.session.scalar(
             select(XYAccount.id).where(XYAccount.id == account.id, XYAccount.owner_id == owner_id).with_for_update()
@@ -293,31 +307,38 @@ class MessageNotificationService:
         await self.session.commit()
         return True
 
-    async def _get_channel(self, owner_id: int, channel_id: int) -> NotificationChannel | None:
-        stmt = select(NotificationChannel).where(
-            NotificationChannel.owner_id == owner_id,
+    async def _get_channel(self, owner_id: int | None, channel_id: int) -> NotificationChannel | None:
+        conditions = [
             NotificationChannel.id == channel_id,
             NotificationChannel.is_deleted.is_(False),
-        )
+        ]
+        if owner_id is not None:
+            conditions.insert(0, NotificationChannel.owner_id == owner_id)
+        stmt = select(NotificationChannel).where(*conditions)
         result = await self.session.execute(stmt.with_for_update())
         return result.scalars().first()
 
     async def _query_notifications(
         self,
-        owner_id: int,
+        owner_id: int | None,
         account_identifier: str | None = None,
     ) -> list[tuple[MessageNotification, NotificationChannel, str]]:
+        owner_conditions = []
+        if owner_id is not None:
+            owner_conditions = [
+                MessageNotification.owner_id == owner_id,
+                NotificationChannel.owner_id == owner_id,
+                XYAccount.owner_id == owner_id,
+            ]
         stmt = (
             select(MessageNotification, NotificationChannel, XYAccount.account_id)
             .join(NotificationChannel, NotificationChannel.id == MessageNotification.channel_id)
             .join(XYAccount, XYAccount.id == MessageNotification.account_pk)
             .where(
-                MessageNotification.owner_id == owner_id,
+                *owner_conditions,
                 MessageNotification.is_deleted.is_(False),
                 NotificationChannel.enabled.is_(True),
                 NotificationChannel.is_deleted.is_(False),
-                NotificationChannel.owner_id == owner_id,
-                XYAccount.owner_id == owner_id,
             )
             .order_by(XYAccount.account_id, MessageNotification.id)
         )

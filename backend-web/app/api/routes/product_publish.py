@@ -29,6 +29,7 @@ from app.services.auto_relist_rule_service import AutoRelistRuleService
 from app.services.auto_relist_serializers import serialize_auto_relist_event, serialize_auto_relist_rule
 from common.models.user import User, UserRole
 from common.schemas.common import ApiResponse
+from common.utils.auth_scope import resolve_owner_scope
 from common.utils.local_image_upload import ImageUploadError, save_uploaded_image
 from common.utils.local_video_upload import VideoUploadError, save_uploaded_video
 from app.core.paths import get_upload_path
@@ -773,6 +774,7 @@ async def publish_batch(
         batch_id=batch_id,
         account_ids=req.account_ids,
         material_count=len(materials),
+        owner_id=current_user.id,
     )
 
     # 创建后台任务
@@ -806,13 +808,16 @@ async def get_batch_status(
 
     unknown_sync_message = "批量任务同步状态缓存不存在，无法判断自动获取商品结果"
 
+    # 管理员看全部批次，普通用户只看自己的发布日志
+    owner_id, _ = resolve_owner_scope(current_user)
+    log_conditions = [PublishLog.batch_id == batch_id]
+    if owner_id is not None:
+        log_conditions.append(PublishLog.user_id == owner_id)
+
     stmt = select(
         PublishLog.status,
         func.count().label("cnt"),
-    ).where(
-        PublishLog.batch_id == batch_id,
-        PublishLog.user_id == current_user.id,
-    ).group_by(PublishLog.status)
+    ).where(*log_conditions).group_by(PublishLog.status)
 
     rows = (await session.execute(stmt)).all()
     counts = {r.status: r.cnt for r in rows}
@@ -821,10 +826,7 @@ async def get_batch_status(
         PublishLog.account_id,
         PublishLog.status,
         func.count().label("cnt"),
-    ).where(
-        PublishLog.batch_id == batch_id,
-        PublishLog.user_id == current_user.id,
-    ).group_by(PublishLog.account_id, PublishLog.status)
+    ).where(*log_conditions).group_by(PublishLog.account_id, PublishLog.status)
     account_rows = (await session.execute(account_stmt)).all()
 
     account_count_map: Dict[str, Dict[str, int]] = {}
@@ -837,7 +839,7 @@ async def get_batch_status(
     failed = counts.get("failed", 0)
     publishing = counts.get("publishing", 0)
     pending = counts.get("pending", 0)
-    batch_snapshot = await PublishBatchStatusService.get_batch_snapshot(batch_id)
+    batch_snapshot = await PublishBatchStatusService.get_batch_snapshot(batch_id, owner_id)
 
     if batch_snapshot is None:
         if total == 0:

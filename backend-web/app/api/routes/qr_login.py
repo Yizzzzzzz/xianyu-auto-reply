@@ -46,6 +46,27 @@ def _cleanup_session(session_id: str):
     SESSION_LOCKS.pop(session_id, None)
 
 
+def _session_owner_mismatch(session_id: str, user_id: int) -> bool:
+    """会话是否属于他人：SESSION_OWNER 或已处理记录中登记的归属与当前用户不一致。"""
+    owner_id = SESSION_OWNER.get(session_id)
+    if owner_id is not None:
+        return owner_id != user_id
+    processed_info = PROCESSED_SESSIONS.get(session_id)
+    if processed_info is not None:
+        processed_owner = processed_info.get("owner_id")
+        if processed_owner is not None:
+            return processed_owner != user_id
+    return False
+
+
+def _can_access_session(session_id: str, user_id: int) -> bool:
+    """当前用户是否可访问该扫码会话的 Cookie：生成者或已处理记录的归属是本人。"""
+    if SESSION_OWNER.get(session_id) == user_id:
+        return True
+    processed_info = PROCESSED_SESSIONS.get(session_id)
+    return bool(processed_info and processed_info.get("owner_id") == user_id)
+
+
 def _build_processed_response(processed_info: dict) -> ApiResponse:
     processed_status = processed_info.get("status")
     processed_message = processed_info.get("message") or (
@@ -124,6 +145,12 @@ async def get_qr_status(
     - already_processed: 已处理过
     """
     try:
+        # 会话归属校验：只允许生成该二维码的用户查询，他人（含已处理记录）一律按不存在处理，不泄露状态与账号
+        if _session_owner_mismatch(session_id, current_user.id):
+            return ApiResponse(
+                success=False,
+                message="会话不存在或已过期",
+            )
         # 检查是否已处理过
         if session_id in PROCESSED_SESSIONS:
             processed_info = PROCESSED_SESSIONS[session_id]
@@ -163,6 +190,7 @@ async def get_qr_status(
                             "message": message,
                             "account_id": unb or "",
                             "is_new_account": True,
+                            "owner_id": owner_id,
                         }
                         _cleanup_session(session_id)
                         return ApiResponse(
@@ -221,6 +249,7 @@ async def get_qr_status(
                     PROCESSED_SESSIONS[session_id] = {
                         "account_id": account.account_id,
                         "is_new_account": is_new_account,
+                        "owner_id": owner_id,
                     }
                     
                     _cleanup_session(session_id)
@@ -267,6 +296,12 @@ async def get_qr_cookie(
     仅在扫码成功后可用
     """
     try:
+        # Cookie 属敏感登录态：只允许生成该二维码的用户获取，他人一律按不存在处理
+        if not _can_access_session(session_id, current_user.id):
+            return ApiResponse(
+                success=False,
+                message="Cookie不存在或会话未完成",
+            )
         cookies_info = qr_login_manager.get_session_cookies(session_id)
         
         if cookies_info:

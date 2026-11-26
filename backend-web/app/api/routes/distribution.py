@@ -222,7 +222,7 @@ async def get_pickup_url(
     if not record:
         return ApiResponse(success=False, message="对接记录不存在")
     if not is_admin and record.user_id != current_user.id:
-        return ApiResponse(success=False, message="无权操作该对接记录")
+        return ApiResponse(success=False, message="对接记录不存在")
 
     # 提货秘钥归属于"对接记录归属人"：本人操作即当前用户；管理员代为操作时取记录归属人
     if record.user_id == current_user.id:
@@ -1006,7 +1006,7 @@ async def get_agent_order_detail(
             or order.owner_user_id == current_user.id
         )
         if not related:
-            return {"success": False, "message": "无权查看该订单"}
+            return {"success": False, "message": "订单不存在"}
 
     return {
         "success": True,

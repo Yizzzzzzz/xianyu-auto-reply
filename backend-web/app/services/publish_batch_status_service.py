@@ -22,7 +22,13 @@ class PublishBatchStatusService:
     _ttl_seconds = 24 * 60 * 60
 
     @classmethod
-    async def init_batch(cls, batch_id: str, account_ids: list[str], material_count: int) -> None:
+    async def init_batch(
+        cls,
+        batch_id: str,
+        account_ids: list[str],
+        material_count: int,
+        owner_id: int | None = None,
+    ) -> None:
         unique_account_ids = list(dict.fromkeys(account_ids))
         accounts = {
             account_id: {
@@ -41,6 +47,7 @@ class PublishBatchStatusService:
                 "account_order": unique_account_ids,
                 "material_count": material_count,
                 "accounts": accounts,
+                "owner_id": owner_id,
                 "last_access": time.time(),
             }
 
@@ -72,11 +79,20 @@ class PublishBatchStatusService:
         )
 
     @classmethod
-    async def get_batch_snapshot(cls, batch_id: str) -> dict[str, Any] | None:
+    async def get_batch_snapshot(
+        cls, batch_id: str, owner_id: int | None = None
+    ) -> dict[str, Any] | None:
+        """取批量任务快照。owner_id 为 None 表示管理员（看全部）；
+        普通用户只允许取归属自己的批次；未记录归属的历史批次只对管理员可见。"""
         async with cls._lock:
             cls._cleanup_locked()
             record = cls._cache.get(batch_id)
             if not record:
+                return None
+            record_owner = record.get("owner_id")
+            if owner_id is not None and (
+                record_owner is None or record_owner != owner_id
+            ):
                 return None
             record["last_access"] = time.time()
             return deepcopy(record)

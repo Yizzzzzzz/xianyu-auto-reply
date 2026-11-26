@@ -226,11 +226,14 @@ async def connect_account(
 async def disconnect_account(
     account_id: str,
     current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db_session),
 ):
     """
     断开指定账号的IM WebSocket
     """
     try:
+        if not await _get_owned_chat_account(account_id, current_user, db):
+            return ApiResponse(success=False, message="账号不存在或无权操作")
         manager = get_im_session_manager()
         await manager.disconnect(account_id)
         return ApiResponse(success=True, message="已断开连接")
@@ -246,6 +249,7 @@ async def get_conversations(
     cursor: int = None,
     limit: int = 20,
     current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db_session),
 ):
     """
     获取指定账号的会话列表
@@ -256,6 +260,8 @@ async def get_conversations(
         limit: 每页数量，默认20
     """
     try:
+        if not await _get_owned_chat_account(account_id, current_user, db):
+            return ApiResponse(success=False, message="账号不存在或无权操作")
         manager = get_im_session_manager()
         client = manager.clients.get(account_id)
         if not client or not client.is_connected:
@@ -364,6 +370,7 @@ async def get_messages(
     cursor: int = None,
     limit: int = 20,
     current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db_session),
 ):
     """
     获取指定会话的聊天记录
@@ -375,6 +382,8 @@ async def get_messages(
         limit: 每页数量，默认20
     """
     try:
+        if not await _get_owned_chat_account(account_id, current_user, db):
+            return ApiResponse(success=False, message="账号不存在或无权操作")
         manager = get_im_session_manager()
         client = manager.clients.get(account_id)
         if not client or not client.is_connected:
@@ -450,6 +459,7 @@ async def send_message(
     account_id: str,
     req: SendMessageRequest,
     current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db_session),
 ):
     """
     发送文本消息
@@ -459,6 +469,8 @@ async def send_message(
         req: 包含 cid（会话ID）、toUserId（对方用户ID）、text（消息内容）
     """
     try:
+        if not await _get_owned_chat_account(account_id, current_user, db):
+            return ApiResponse(success=False, message="账号不存在或无权操作")
         manager = get_im_session_manager()
         client = manager.clients.get(account_id)
         if not client or not client.is_connected:

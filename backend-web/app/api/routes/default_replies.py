@@ -187,7 +187,8 @@ async def get_all_default_replies(
     reply_service: DefaultReplyService = Depends(get_default_reply_service),
 ):
     """获取当前用户所有账号的默认回复设置"""
-    account_ids = await account_service.list_account_ids(current_user.id)
+    owner_id, _ = resolve_owner_scope(current_user)
+    account_ids = await account_service.list_account_ids(owner_id)
     
     return await reply_service.get_all_default_replies(account_ids)
 

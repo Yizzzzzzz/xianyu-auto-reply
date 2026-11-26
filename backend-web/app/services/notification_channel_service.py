@@ -37,21 +37,25 @@ class NotificationChannelService:
     def __init__(self, session: AsyncSession):
         self.session = session
 
-    async def list_channels(self, owner_id: int) -> list[dict[str, Any]]:
+    async def list_channels(self, owner_id: int | None) -> list[dict[str, Any]]:
+        """按归属列渠道；owner_id 为 None 表示管理员（看全部）。"""
+        conditions = [NotificationChannel.is_deleted.is_(False)]
+        if owner_id is not None:
+            conditions.append(NotificationChannel.owner_id == owner_id)
         stmt = (
             select(NotificationChannel)
-            .where(
-                NotificationChannel.owner_id == owner_id,
-                NotificationChannel.is_deleted.is_(False),
-            )
+            .where(*conditions)
             .order_by(NotificationChannel.created_at.desc())
         )
         result = await self.session.execute(stmt)
         return [self._serialize(channel) for channel in result.scalars().all()]
 
-    async def list_channel_page(self, owner_id: int, page: int, page_size: int) -> dict[str, Any]:
-        """按所属用户分页读取渠道，返回分页信息及各类型总数。"""
-        filters = (NotificationChannel.owner_id == owner_id, NotificationChannel.is_deleted.is_(False))
+    async def list_channel_page(self, owner_id: int | None, page: int, page_size: int) -> dict[str, Any]:
+        """按所属用户分页读取渠道，返回分页信息及各类型总数；owner_id 为 None 表示管理员（看全部）。"""
+        filters = [NotificationChannel.is_deleted.is_(False)]
+        if owner_id is not None:
+            filters.insert(0, NotificationChannel.owner_id == owner_id)
+        filters = tuple(filters)
         counts = (await self.session.execute(
             select(NotificationChannel.channel_type, func.count())
             .where(*filters).group_by(NotificationChannel.channel_type)
@@ -90,12 +94,14 @@ class NotificationChannelService:
         await self.session.refresh(channel)
         return self._serialize(channel)
 
-    async def get_channel(self, owner_id: int, channel_id: int, *, for_update: bool = False) -> NotificationChannel | None:
-        stmt = select(NotificationChannel).where(
-            NotificationChannel.owner_id == owner_id,
+    async def get_channel(self, owner_id: int | None, channel_id: int, *, for_update: bool = False) -> NotificationChannel | None:
+        conditions = [
             NotificationChannel.id == channel_id,
             NotificationChannel.is_deleted.is_(False),
-        )
+        ]
+        if owner_id is not None:
+            conditions.insert(0, NotificationChannel.owner_id == owner_id)
+        stmt = select(NotificationChannel).where(*conditions)
         if for_update:
             stmt = stmt.with_for_update().execution_options(populate_existing=True)
         result = await self.session.execute(stmt)
@@ -103,7 +109,7 @@ class NotificationChannelService:
 
     async def update_channel(
         self,
-        owner_id: int,
+        owner_id: int | None,
         channel_id: int,
         payload: NotificationChannelUpdate,
     ) -> dict[str, Any] | None:
@@ -140,7 +146,7 @@ class NotificationChannelService:
         await self.session.refresh(channel)
         return self._serialize(channel)
 
-    async def delete_channel(self, owner_id: int, channel_id: int) -> bool:
+    async def delete_channel(self, owner_id: int | None, channel_id: int) -> bool:
         channel = await self.get_channel(owner_id, channel_id, for_update=True)
         if not channel:
             return False

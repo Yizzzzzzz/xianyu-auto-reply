@@ -386,7 +386,10 @@ async def get_table_data(
 
 
 @router.delete("/data/{table_name}")
-async def clear_table_placeholder(table_name: str) -> JSONResponse:
+async def clear_table_placeholder(
+    table_name: str,
+    _: User = Depends(deps.get_current_admin_user),
+) -> JSONResponse:
     return JSONResponse(
         status_code=status.HTTP_501_NOT_IMPLEMENTED,
         content={"success": False, "message": f"尚未支持清空表 {table_name} 的接口"},
@@ -394,7 +397,10 @@ async def clear_table_placeholder(table_name: str) -> JSONResponse:
 
 
 @router.delete("/data/{table_name}/{record_id}")
-async def delete_table_record_placeholder(table_name: str, record_id: str) -> JSONResponse:
+async def delete_table_record_placeholder(
+    table_name: str, record_id: str,
+    _: User = Depends(deps.get_current_admin_user),
+) -> JSONResponse:
     return JSONResponse(
         status_code=status.HTTP_501_NOT_IMPLEMENTED,
         content={"success": False, "message": f"尚未支持删除 {table_name} 记录 {record_id}"},

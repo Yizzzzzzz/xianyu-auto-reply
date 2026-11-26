@@ -13,6 +13,8 @@
 """
 from __future__ import annotations
 
+import time
+
 import httpx
 from fastapi import APIRouter, Depends
 from loguru import logger
@@ -28,10 +30,52 @@ from app.services.password_login.manager import SESSION_PREFIX
 from common.models.system_setting import SystemSetting
 from common.models.user import User
 from common.services.account_limit_service import AccountLimitExceededError, AccountLimitService
+from common.utils.auth_scope import is_admin_user
 
 router = APIRouter(prefix="/password-login", tags=["密码登录"])
 
 settings = get_settings()
+
+
+# 浏览器登录会话归属登记（内存）：session_id -> (owner_id, created_at)。
+# websocket 服务的浏览器会话本身不做归属校验，backend-web 在创建时登记、
+# 在查询/取消时校验，防止任意登录用户凭 session_id 查询或取消他人会话。
+# 服务重启后登记丢失，未登记的会话一律按不存在处理（fail-closed；登录
+# 是分钟级操作，用户重试即可）。
+BROWSER_SESSION_OWNER: dict[str, tuple[int, float]] = {}
+_BROWSER_SESSION_TTL_SECONDS = 3600.0
+
+
+def _register_browser_session(session_id: str, owner_id: int) -> None:
+    now = time.time()
+    expired = [
+        sid
+        for sid, (_, ts) in BROWSER_SESSION_OWNER.items()
+        if now - ts > _BROWSER_SESSION_TTL_SECONDS
+    ]
+    for sid in expired:
+        BROWSER_SESSION_OWNER.pop(sid, None)
+    BROWSER_SESSION_OWNER[session_id] = (owner_id, now)
+
+
+def _browser_session_owner(session_id: str) -> int | None:
+    entry = BROWSER_SESSION_OWNER.get(session_id)
+    if entry is None:
+        return None
+    owner_id, ts = entry
+    if time.time() - ts > _BROWSER_SESSION_TTL_SECONDS:
+        BROWSER_SESSION_OWNER.pop(session_id, None)
+        return None
+    return owner_id
+
+
+def _can_access_browser_session(session_id: str, current_user: User) -> bool:
+    """当前用户是否可查询/取消该浏览器登录会话：管理员放行，普通用户
+    须是创建该会话的人，未登记的会话一律不可访问。"""
+    if is_admin_user(current_user):
+        return True
+    owner_id = _browser_session_owner(session_id)
+    return owner_id is not None and owner_id == current_user.id
 
 
 # ==================== 请求模型 ====================
@@ -127,7 +171,10 @@ async def _proxy_ws_login(request: PasswordLoginRequest, user_id: int) -> dict:
                 },
             )
             if resp.status_code == 200:
-                return resp.json()
+                data = resp.json()
+                if data.get("success") and data.get("session_id"):
+                    _register_browser_session(data["session_id"], user_id)
+                return data
             logger.error(f"WebSocket服务返回错误: {resp.status_code}")
             return {"success": False, "message": f"登录服务异常: {resp.status_code}"}
     except httpx.ConnectError:
@@ -151,7 +198,11 @@ async def check_login_status(
             return {"status": "not_found", "message": "会话不存在或已过期"}
         return result
 
-    # 浏览器会话：代理 websocket
+    # 浏览器会话：代理 websocket；先校验会话归属，未登记或非本人的
+    # 会话一律按不存在处理，不向 websocket 透传
+    if not _can_access_browser_session(session_id, current_user):
+        return {"status": "not_found", "message": "会话不存在或已过期"}
+
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(
@@ -176,6 +227,10 @@ async def cancel_login(
     if session_id.startswith(SESSION_PREFIX):
         ok = password_login_manager.cancel(session_id, current_user.id)
         return {"success": ok, "message": "登录会话已取消" if ok else "会话不存在"}
+
+    # 浏览器会话：先校验会话归属，未登记或非本人的会话一律按不存在处理
+    if not _can_access_browser_session(session_id, current_user):
+        return {"success": False, "message": "会话不存在"}
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:

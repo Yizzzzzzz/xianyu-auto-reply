@@ -327,7 +327,7 @@ async def update_message_filter(
     owner_id, _ = resolve_owner_scope(current_user)
     account = await account_service.get_account_for_user(owner_id, row.account_id)
     if not account:
-        raise HTTPException(status_code=403, detail="无权操作此规则")
+        raise HTTPException(status_code=404, detail="规则不存在")
     
     # 构建更新语句
     updates = []
@@ -390,7 +390,7 @@ async def delete_message_filter(
     owner_id, _ = resolve_owner_scope(current_user)
     account = await account_service.get_account_for_user(owner_id, row.account_id)
     if not account:
-        raise HTTPException(status_code=403, detail="无权操作此规则")
+        raise HTTPException(status_code=404, detail="规则不存在")
     
     await session.execute(
         text("DELETE FROM xy_message_filters WHERE id = :id"),
@@ -412,8 +412,9 @@ async def batch_delete_message_filters(
     if not request.ids:
         return ApiResponse(success=False, message="请选择要删除的规则")
     
-    # 获取用户所有账号
-    user_account_ids = set(await account_service.list_account_ids(current_user.id))
+    # 获取用户所有账号（管理员为 None，取全部账号；普通用户仅本人账号）
+    owner_id, _ = resolve_owner_scope(current_user)
+    user_account_ids = set(await account_service.list_account_ids(owner_id))
     
     # 查询要删除的规则
     placeholders = ", ".join([f":id_{i}" for i in range(len(request.ids))])
@@ -469,7 +470,7 @@ async def toggle_message_filter(
     owner_id, _ = resolve_owner_scope(current_user)
     account = await account_service.get_account_for_user(owner_id, row.account_id)
     if not account:
-        raise HTTPException(status_code=403, detail="无权操作此规则")
+        raise HTTPException(status_code=404, detail="规则不存在")
     
     new_enabled = 0 if row.enabled else 1
     await session.execute(

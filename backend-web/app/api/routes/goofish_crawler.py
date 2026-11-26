@@ -114,6 +114,17 @@ async def create_job(
 ):
     """创建采集任务"""
     try:
+        # 账号归属校验：cookie_id 必须是当前用户名下的闲鱼账号，否则他人账号的 Cookie
+        # 会在 run-once 时被直接取用（本文件其余端点均只认 owner_id == 当前用户，管理员亦然）
+        from common.models.xy_account import XYAccount
+        account_stmt = select(XYAccount).where(
+            XYAccount.account_id == payload.cookie_id,
+            XYAccount.owner_id == current_user.id,
+        )
+        account_result = await db.execute(account_stmt)
+        if account_result.scalar_one_or_none() is None:
+            return ApiResponse(success=False, message="账号不存在或无权使用")
+
         job = GoofishCrawlJob(
             owner_id=current_user.id,
             cookie_id=payload.cookie_id,
@@ -260,13 +271,13 @@ async def run_once_job(
         if not job:
             return {"success": False, "error": "任务不存在", "upserted": 0, "total": 0}
         
-        # 查询账号Cookie
+        # 查询账号Cookie（归属复核：任务创建前已校验，防御历史任务/脏数据借用他人账号）
         from common.models.xy_account import XYAccount
         account_stmt = select(XYAccount).where(XYAccount.account_id == job.cookie_id)
         account_result = await db.execute(account_stmt)
         account = account_result.scalar_one_or_none()
-        
-        if not account or not account.cookie:
+
+        if not account or not account.cookie or account.owner_id != current_user.id:
             job.last_error = "账号Cookie不可用"
             await db.commit()
             return {"success": False, "error": "账号Cookie不可用", "upserted": 0, "total": 0}

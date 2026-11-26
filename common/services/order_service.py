@@ -754,21 +754,21 @@ class OrderService:
             await self.session.rollback()
             return False
 
-    async def delete_order(self, order_id: int, owner_id: int) -> bool:
+    async def delete_order(self, order_id: int, owner_id: int | None) -> bool:
         """删除订单
-        
+
         Args:
             order_id: 订单ID（主键）
-            owner_id: 用户ID（用于权限验证）
-            
+            owner_id: 用户ID（用于权限验证，None表示管理员，不限制归属）
+
         Returns:
             是否删除成功
         """
         try:
-            stmt = select(XYOrder).where(
-                XYOrder.id == order_id,
-                XYOrder.owner_id == owner_id
-            )
+            conditions = [XYOrder.id == order_id]
+            if owner_id is not None:
+                conditions.append(XYOrder.owner_id == owner_id)
+            stmt = select(XYOrder).where(*conditions)
             result = await self.session.execute(stmt)
             order = result.scalars().first()
             

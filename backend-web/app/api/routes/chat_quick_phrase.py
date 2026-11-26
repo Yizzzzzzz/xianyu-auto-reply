@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_active_user, get_db_session
 from common.models import ChatQuickPhrase, User
 from common.schemas.common import ApiResponse
+from common.utils.auth_scope import is_admin_user
 
 
 router = APIRouter(prefix="/chat-new")
@@ -46,11 +47,12 @@ async def list_quick_phrases(
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db_session),
 ):
-    """查询当前用户的快捷短语列表（按排序值、ID 升序）"""
+    """查询快捷短语列表（管理员查看全部，普通用户仅看本人，按排序值、ID 升序）"""
+    query = select(ChatQuickPhrase)
+    if not is_admin_user(current_user):
+        query = query.where(ChatQuickPhrase.owner_id == current_user.id)
     result = await db.execute(
-        select(ChatQuickPhrase)
-        .where(ChatQuickPhrase.owner_id == current_user.id)
-        .order_by(ChatQuickPhrase.sort_order.asc(), ChatQuickPhrase.id.asc())
+        query.order_by(ChatQuickPhrase.sort_order.asc(), ChatQuickPhrase.id.asc())
     )
     return ApiResponse(success=True, data=[_quick_phrase_data(item) for item in result.scalars().all()])
 
@@ -81,12 +83,12 @@ async def update_quick_phrase(
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db_session),
 ):
-    """更新指定快捷短语（仅限本人所有）"""
+    """更新指定快捷短语（管理员可操作全部，普通用户仅限本人所有）"""
+    conditions = [ChatQuickPhrase.id == phrase_id]
+    if not is_admin_user(current_user):
+        conditions.append(ChatQuickPhrase.owner_id == current_user.id)
     result = await db.execute(
-        select(ChatQuickPhrase).where(
-            ChatQuickPhrase.id == phrase_id,
-            ChatQuickPhrase.owner_id == current_user.id,
-        )
+        select(ChatQuickPhrase).where(*conditions)
     )
     phrase = result.scalar_one_or_none()
     if not phrase:
@@ -105,12 +107,12 @@ async def delete_quick_phrase(
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db_session),
 ):
-    """删除指定快捷短语（仅限本人所有）"""
+    """删除指定快捷短语（管理员可操作全部，普通用户仅限本人所有）"""
+    conditions = [ChatQuickPhrase.id == phrase_id]
+    if not is_admin_user(current_user):
+        conditions.append(ChatQuickPhrase.owner_id == current_user.id)
     result = await db.execute(
-        select(ChatQuickPhrase).where(
-            ChatQuickPhrase.id == phrase_id,
-            ChatQuickPhrase.owner_id == current_user.id,
-        )
+        select(ChatQuickPhrase).where(*conditions)
     )
     phrase = result.scalar_one_or_none()
     if not phrase:

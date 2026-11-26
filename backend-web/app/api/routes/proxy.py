@@ -15,6 +15,7 @@ from loguru import logger
 from app.api import deps
 from common.models.user import User
 from common.models.xy_account import XYAccount
+from common.utils.auth_scope import resolve_owner_scope
 
 router = APIRouter(tags=["代理配置"])
 
@@ -47,11 +48,12 @@ async def get_proxy_config(
 ):
     """获取账号的代理配置"""
     try:
-        # 查询账号
-        stmt = select(XYAccount).where(
-            XYAccount.owner_id == current_user.id,
-            XYAccount.account_id == account_id,
-        )
+        # 查询账号（管理员不限归属，普通用户仅本人账号）
+        owner_id, _ = resolve_owner_scope(current_user)
+        conditions = [XYAccount.account_id == account_id]
+        if owner_id is not None:
+            conditions.append(XYAccount.owner_id == owner_id)
+        stmt = select(XYAccount).where(*conditions)
         result = await session.execute(stmt)
         account = result.scalars().first()
         
@@ -113,11 +115,12 @@ async def update_proxy_config(
                     message="代理端口无效"
                 )
         
-        # 查询账号
-        stmt = select(XYAccount).where(
-            XYAccount.owner_id == current_user.id,
-            XYAccount.account_id == account_id,
-        )
+        # 查询账号（管理员不限归属，普通用户仅本人账号）
+        owner_id, _ = resolve_owner_scope(current_user)
+        conditions = [XYAccount.account_id == account_id]
+        if owner_id is not None:
+            conditions.append(XYAccount.owner_id == owner_id)
+        stmt = select(XYAccount).where(*conditions)
         result = await session.execute(stmt)
         account = result.scalars().first()
         
@@ -161,11 +164,12 @@ async def clear_proxy_config(
 ):
     """清除账号的代理配置"""
     try:
-        # 查询账号
-        stmt = select(XYAccount).where(
-            XYAccount.owner_id == current_user.id,
-            XYAccount.account_id == account_id,
-        )
+        # 查询账号（管理员不限归属，普通用户仅本人账号）
+        owner_id, _ = resolve_owner_scope(current_user)
+        conditions = [XYAccount.account_id == account_id]
+        if owner_id is not None:
+            conditions.append(XYAccount.owner_id == owner_id)
+        stmt = select(XYAccount).where(*conditions)
         result = await session.execute(stmt)
         account = result.scalars().first()
         

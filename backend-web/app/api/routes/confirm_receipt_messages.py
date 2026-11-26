@@ -10,11 +10,28 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user, get_db_session
 from common.models.confirm_receipt_message import ConfirmReceiptMessage
 from common.models.user import User
+from common.models.xy_account import XYAccount
 from common.schemas.common import ApiResponse
+from common.utils.auth_scope import resolve_owner_scope
 from common.utils.local_image_upload import ImageUploadError, save_uploaded_image
 from common.utils.time_utils import get_beijing_now_naive
 
 router = APIRouter(tags=["confirm-receipt-messages"])
+
+
+async def _get_owned_account(
+    db: AsyncSession, account_id: str, current_user: User
+) -> XYAccount | None:
+    """按归属查询账号：管理员不限 owner，普通用户仅限本人账号；不存在或非本人均返回 None。
+
+    ConfirmReceiptMessage 表只有 account_id、无 owner_id，故先通过账号解析归属再校验。
+    """
+    owner_id, is_admin = resolve_owner_scope(current_user)
+    conditions = [XYAccount.account_id == account_id]
+    if not is_admin:
+        conditions.append(XYAccount.owner_id == owner_id)
+    result = await db.execute(select(XYAccount).where(*conditions))
+    return result.scalars().first()
 
 # 图片保存目录 - 使用统一的静态文件根目录（兼容Docker共享卷）
 from app.core.paths import STATIC_ROOT
@@ -42,6 +59,8 @@ async def get_confirm_receipt_message(
     current_user: User = Depends(get_current_user),
 ):
     """获取账号的确认收货消息配置"""
+    if await _get_owned_account(db, account_id, current_user) is None:
+        raise HTTPException(status_code=404, detail="账号不存在或无权访问")
     result = await db.execute(
         select(ConfirmReceiptMessage).where(ConfirmReceiptMessage.account_id == account_id)
     )
@@ -65,6 +84,8 @@ async def update_confirm_receipt_message(
     current_user: User = Depends(get_current_user),
 ):
     """更新账号的确认收货消息配置"""
+    if await _get_owned_account(db, account_id, current_user) is None:
+        raise HTTPException(status_code=404, detail="账号不存在或无权访问")
     result = await db.execute(
         select(ConfirmReceiptMessage).where(ConfirmReceiptMessage.account_id == account_id)
     )
@@ -99,6 +120,8 @@ async def upload_confirm_receipt_image(
     current_user: User = Depends(get_current_user),
 ):
     """上传确认收货消息图片"""
+    if await _get_owned_account(db, account_id, current_user) is None:
+        raise HTTPException(status_code=404, detail="账号不存在或无权访问")
     try:
         _, filename, _ = await save_uploaded_image(
             image,

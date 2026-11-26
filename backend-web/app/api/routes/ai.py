@@ -23,7 +23,8 @@ async def list_ai_reply_settings(
     current_user: User = Depends(deps.get_current_active_user),
     ai_service: AIReplySettingsService = Depends(deps.get_ai_reply_service),
 ) -> dict[str, AIReplySettings]:
-    return await ai_service.list_settings(current_user.id)
+    owner_id, _ = resolve_owner_scope(current_user)
+    return await ai_service.list_settings(owner_id)
 
 
 @router.post("/models", response_model=ApiResponse)
@@ -104,7 +105,8 @@ async def bulk_update_ai_settings(
     account_service: AccountService = Depends(deps.get_account_service),
     ai_service: AIReplySettingsService = Depends(deps.get_ai_reply_service),
 ) -> ApiResponse:
-    accounts = await account_service.list_accounts(current_user.id)
+    owner_id, _ = resolve_owner_scope(current_user)
+    accounts = await account_service.list_accounts(owner_id)
     account_lookup = {account.account_id: account for account in accounts}
     updated = 0
     for cookie_id, payload in settings_map.items():

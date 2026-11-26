@@ -6,6 +6,7 @@ from loguru import logger
 
 from app.api import deps
 from common.models.user import User
+from common.utils.auth_scope import resolve_owner_scope
 from common.schemas.common import ApiResponse
 from common.services.email_log_service import EMAIL_OPERATION_NOTIFICATION_CHANNEL_TEST, record_email_log
 from common.utils.http_utils import get_client_ip
@@ -35,7 +36,8 @@ async def list_notification_channels(
     current_user: User = Depends(deps.get_current_active_user),
     service: NotificationChannelService = Depends(deps.get_notification_channel_service),
 ) -> list[dict]:
-    return await service.list_channels(current_user.id)
+    owner_id, _ = resolve_owner_scope(current_user)
+    return await service.list_channels(owner_id)
 
 
 @channels_router.get("/page", response_model=ApiResponse)
@@ -46,7 +48,8 @@ async def list_notification_channel_page(
     service: NotificationChannelService = Depends(deps.get_notification_channel_service),
 ) -> ApiResponse:
     """分页读取通知渠道，保留原数组接口供账号选择和旧客户端使用。"""
-    data = await service.list_channel_page(current_user.id, page, page_size)
+    owner_id, _ = resolve_owner_scope(current_user)
+    data = await service.list_channel_page(owner_id, page, page_size)
     return ApiResponse(success=True, message="操作成功", data=data)
 
 
@@ -70,8 +73,9 @@ async def update_notification_channel(
     current_user: User = Depends(deps.get_current_active_user),
     service: NotificationChannelService = Depends(deps.get_notification_channel_service),
 ) -> ApiResponse:
+    owner_id, _ = resolve_owner_scope(current_user)
     try:
-        updated = await service.update_channel(current_user.id, channel_id, payload)
+        updated = await service.update_channel(owner_id, channel_id, payload)
     except (NotificationConfigValidationError, NotificationTemplateValidationError, NotificationTypeValidationError) as error:
         return ApiResponse(success=False, code=40001, message=str(error), data=None)
     if not updated:
@@ -85,7 +89,8 @@ async def delete_notification_channel(
     current_user: User = Depends(deps.get_current_active_user),
     service: NotificationChannelService = Depends(deps.get_notification_channel_service),
 ) -> ApiResponse:
-    deleted = await service.delete_channel(current_user.id, channel_id)
+    owner_id, _ = resolve_owner_scope(current_user)
+    deleted = await service.delete_channel(owner_id, channel_id)
     if not deleted:
         return ApiResponse(success=False, code=40401, message="通知渠道不存在", data=None)
     return ApiResponse(success=True, message="通知渠道已删除")
@@ -100,7 +105,8 @@ async def test_notification_channel(
 ) -> ApiResponse:
     """测试通知渠道"""
     # 获取渠道信息
-    channel = await service.get_channel(current_user.id, channel_id)
+    owner_id, _ = resolve_owner_scope(current_user)
+    channel = await service.get_channel(owner_id, channel_id)
     if not channel:
         return ApiResponse(success=False, code=40401, message="通知渠道不存在", data=None)
     
@@ -160,9 +166,10 @@ async def list_message_notifications(
 ) -> dict | list[dict]:
     # 旧网页不传分页参数，继续返回按账号分组的历史结构；
     # 已有移动端会传 page/page_size 并按数组解析，此时返回扁平列表兼容其既有调用。
+    owner_id, _ = resolve_owner_scope(current_user)
     if page is not None or page_size is not None:
         data = await service.list_notification_page(
-            current_user.id,
+            owner_id,
             page or 1,
             page_size or 20,
         )
@@ -170,7 +177,7 @@ async def list_message_notifications(
             {**item, "enabled": item["subscription_enabled"]}
             for item in data["items"]
         ]
-    return await service.list_notifications(current_user.id)
+    return await service.list_notifications(owner_id)
 
 
 @messages_router.get("/options", response_model=ApiResponse)
@@ -193,7 +200,8 @@ async def list_message_notification_page(
     service: MessageNotificationService = Depends(deps.get_message_notification_service),
 ) -> ApiResponse:
     """分页读取当前用户的消息通知绑定。"""
-    data = await service.list_notification_page(current_user.id, page, page_size)
+    owner_id, _ = resolve_owner_scope(current_user)
+    data = await service.list_notification_page(owner_id, page, page_size)
     return ApiResponse(success=True, message="操作成功", data=data)
 
 
@@ -203,7 +211,8 @@ async def list_message_notifications_for_account(
     current_user: User = Depends(deps.get_current_active_user),
     service: MessageNotificationService = Depends(deps.get_message_notification_service),
 ) -> list[dict]:
-    return await service.list_for_account(current_user.id, cookie_id)
+    owner_id, _ = resolve_owner_scope(current_user)
+    return await service.list_for_account(owner_id, cookie_id)
 
 
 @messages_router.delete("/account/{cookie_id}", response_model=ApiResponse)
@@ -212,7 +221,8 @@ async def delete_account_notifications(
     current_user: User = Depends(deps.get_current_active_user),
     service: MessageNotificationService = Depends(deps.get_message_notification_service),
 ) -> ApiResponse:
-    deleted = await service.delete_for_account(current_user.id, cookie_id)
+    owner_id, _ = resolve_owner_scope(current_user)
+    deleted = await service.delete_for_account(owner_id, cookie_id)
     if not deleted:
         return ApiResponse(success=False, code=40401, message="账号不存在或没有通知配置", data=None)
     return ApiResponse(success=True, message="账号通知配置已清理")
@@ -226,7 +236,8 @@ async def set_message_notification(
     service: MessageNotificationService = Depends(deps.get_message_notification_service),
 ) -> ApiResponse:
     try:
-        success = await service.set_notification(current_user.id, cookie_id, payload)
+        owner_id, _ = resolve_owner_scope(current_user)
+        success = await service.set_notification(owner_id, cookie_id, payload)
     except NotificationTypeValidationError as error:
         return ApiResponse(success=False, code=40001, message=str(error), data=None)
     if not success:
@@ -240,7 +251,8 @@ async def delete_message_notification(
     current_user: User = Depends(deps.get_current_active_user),
     service: MessageNotificationService = Depends(deps.get_message_notification_service),
 ) -> ApiResponse:
-    deleted = await service.delete_subscription(current_user.id, notification_id)
+    owner_id, _ = resolve_owner_scope(current_user)
+    deleted = await service.delete_subscription(owner_id, notification_id)
     if not deleted:
         return ApiResponse(success=False, code=40401, message="消息通知不存在", data=None)
     return ApiResponse(success=True, message="消息通知已删除")
@@ -254,8 +266,9 @@ async def update_message_notification_enabled(
     service: MessageNotificationService = Depends(deps.get_message_notification_service),
 ) -> ApiResponse:
     """按绑定ID更新启停状态，兼容已有移动端接口。"""
+    owner_id, _ = resolve_owner_scope(current_user)
     updated = await service.update_subscription_enabled(
-        current_user.id,
+        owner_id,
         notification_id,
         payload.enabled,
     )
@@ -271,7 +284,8 @@ async def list_message_notifications_for_account_compat(
     service: MessageNotificationService = Depends(deps.get_message_notification_service),
 ) -> list[dict]:
     """兼容旧客户端的按账号查询路径。"""
-    return await service.list_for_account(current_user.id, cookie_id)
+    owner_id, _ = resolve_owner_scope(current_user)
+    return await service.list_for_account(owner_id, cookie_id)
 
 
 @messages_router.post("/{cookie_id}", response_model=ApiResponse, include_in_schema=False)

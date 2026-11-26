@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from common.models.card import Card
 from common.models.card_item_relation import CardItemRelation
+from common.models.dock_record import DockRecord
 
 
 from common.utils.time_utils import safe_isoformat
@@ -135,7 +136,9 @@ class CardMatcher:
                 best_by_id[cid] = c
         return [best_by_id[cid] for cid in order]
 
-    async def get_all_cards_by_item_id(self, item_id: str) -> List[Dict[str, Any]]:
+    async def get_all_cards_by_item_id(
+        self, item_id: str, user_id: int | None = None
+    ) -> List[Dict[str, Any]]:
         """
         获取商品关联的所有卡券（管理展示用，不过滤启用状态和规格）
         
@@ -146,6 +149,9 @@ class CardMatcher:
         
         Args:
             item_id: 商品ID
+            user_id: 绑定人用户ID；None 表示不限制（管理员）。非 None 时只返回
+                该用户绑定的关联（对接卡券按关联表的 user_id 判定，卡券本身
+                可能属于上游供应商），旧字段回退时按卡券归属过滤。
             
         Returns:
             所有关联的卡券字典列表（含 card_source, dock_record_id）
@@ -159,6 +165,8 @@ class CardMatcher:
             )
             .where(CardItemRelation.item_id == item_id)
         )
+        if user_id is not None:
+            stmt = stmt.where(CardItemRelation.user_id == user_id)
         result = await self.session.execute(stmt)
         rows = result.all()
         
@@ -173,6 +181,8 @@ class CardMatcher:
         
         # 2. 关联表无数据，回退到旧字段（不过滤 enabled）
         legacy_stmt = select(Card).where(Card.item_id == item_id)
+        if user_id is not None:
+            legacy_stmt = legacy_stmt.where(Card.user_id == user_id)
         legacy_result = await self.session.execute(legacy_stmt)
         cards = list(legacy_result.scalars().all())
         
@@ -257,10 +267,11 @@ class CardMatcher:
         Returns:
             {"added": 新增数量, "removed": 删除数量}
         """
-        # 删除旧关联
+        # 删除旧关联（仅删该绑定人自己的行：旧逻辑按 card_id 全量删，
+        # 会删掉他人为同一卡券建的关联）
         delete_result = await self.session.execute(
-            text("DELETE FROM xy_card_item_relations WHERE card_id = :card_id"),
-            {"card_id": card_id}
+            text("DELETE FROM xy_card_item_relations WHERE card_id = :card_id AND user_id = :user_id"),
+            {"card_id": card_id, "user_id": user_id}
         )
         removed = delete_result.rowcount
         
@@ -290,33 +301,59 @@ class CardMatcher:
     ) -> Dict[str, int]:
         """
         更新商品关联的卡券列表（先删旧关联再插新关联）
-        
+
         Args:
             item_id: 商品ID
-            user_id: 用户ID
+            user_id: 绑定人用户ID（路由层按商品归属解析：本人或管理员代操作的商品归属人）
             card_relations: 卡券关联列表，每个元素含 card_id, source, dock_record_id
-            
+
         Returns:
-            {"added": 新增数量, "removed": 删除数量}
+            {"added": 新增数量, "removed": 删除数量, "skipped": 因归属校验跳过数量}
         """
-        # 删除旧关联
+        # 删除旧关联（仅删该绑定人自己的行：旧逻辑按 item_id 全量删，
+        # 会删掉他人为同一商品建的关联）
         delete_result = await self.session.execute(
-            text("DELETE FROM xy_card_item_relations WHERE item_id = :item_id"),
-            {"item_id": item_id}
+            text("DELETE FROM xy_card_item_relations WHERE item_id = :item_id AND user_id = :user_id"),
+            {"item_id": item_id, "user_id": user_id}
         )
         removed = delete_result.rowcount
-        
-        # 插入新关联（允许同一 card_id 多条记录，通过 source+dock_record_id 区分）
+
+        # 插入新关联（允许同一 card_id 多条记录，通过 source+dock_record_id 区分）。
+        # 逐条校验归属，fail-closed：自有卡券须属于绑定人；对接卡券须有属于
+        # 绑定人的对接记录且记录的卡券与本次一致；未知来源一律跳过。
         added = 0
+        skipped = 0
         for rel in (card_relations or []):
             card_id = rel.get("card_id")
             if not card_id:
+                skipped += 1
                 continue
             source = rel.get("source", "own")
             dock_record_id = rel.get("dock_record_id") or 0
+            if source == "own":
+                card = await self.session.get(Card, card_id)
+                if card is None or card.user_id != user_id:
+                    skipped += 1
+                    continue
+            elif source in ("dock_l1", "dock_l2"):
+                record = (
+                    await self.session.get(DockRecord, dock_record_id)
+                    if dock_record_id
+                    else None
+                )
+                if (
+                    record is None
+                    or record.user_id != user_id
+                    or record.card_id != card_id
+                ):
+                    skipped += 1
+                    continue
+            else:
+                skipped += 1
+                continue
             await self.session.execute(
                 text("""
-                    INSERT INTO xy_card_item_relations 
+                    INSERT INTO xy_card_item_relations
                     (user_id, card_id, item_id, source, dock_record_id, created_at, updated_at)
                     VALUES (:user_id, :card_id, :item_id, :source, :dock_record_id, NOW(), NOW())
                 """),
@@ -324,9 +361,9 @@ class CardMatcher:
                  "source": source, "dock_record_id": dock_record_id}
             )
             added += 1
-        
+
         await self.session.flush()
-        return {"added": added, "removed": removed}
+        return {"added": added, "removed": removed, "skipped": skipped}
 
     async def batch_bind_cards_to_items(
         self,

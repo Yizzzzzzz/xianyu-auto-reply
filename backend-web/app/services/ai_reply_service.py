@@ -139,8 +139,10 @@ class AIReplySettingsService:
         account.metadata_json = metadata
         return merged
 
-    async def list_settings(self, owner_id: int) -> dict[str, dict]:
-        stmt = select(XYAccount).where(XYAccount.owner_id == owner_id)
+    async def list_settings(self, owner_id: int | None) -> dict[str, dict]:
+        stmt = select(XYAccount)
+        if owner_id is not None:
+            stmt = stmt.where(XYAccount.owner_id == owner_id)
         result = await self.session.execute(stmt)
         accounts = result.scalars().all()
         return {account.account_id: self._extract_settings(account) for account in accounts}

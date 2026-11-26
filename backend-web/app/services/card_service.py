@@ -254,7 +254,7 @@ class CardService:
             item_id: 商品ID
         """
         matcher = CardMatcher(self.session)
-        return await matcher.get_all_cards_by_item_id(item_id)
+        return await matcher.get_all_cards_by_item_id(item_id, user_id=user_id)
 
     async def get_cards_by_item_id_and_spec(
         self,
@@ -539,15 +539,21 @@ class CardService:
     async def update_card(
         self,
         card_id: int,
-        user_id: int,
+        user_id: int | None,
         **kwargs
     ) -> bool:
         """更新卡券
-        
+
+        Args:
+            user_id: 用户ID，None 表示管理员（不限制归属）
+
         Raises:
             ValueError: 卡券重复时抛出
         """
-        stmt = select(Card).where(Card.id == card_id, Card.user_id == user_id)
+        conditions = [Card.id == card_id]
+        if user_id is not None:
+            conditions.append(Card.user_id == user_id)
+        stmt = select(Card).where(*conditions)
         result = await self.session.execute(stmt)
         card = result.scalars().first()
         if not card:
@@ -567,9 +573,9 @@ class CardService:
         if new_use_no_logistics_form and new_type != "text":
             raise ValueError("无需邮寄表单发货仅支持固定文字卡券")
 
-        # 检查重复（排除自身）
+        # 检查重复（排除自身；按卡券实际归属人查重，管理员代改他人卡券时也查归属人的卡券）
         duplicate_msg = await self.check_card_duplicate(
-            user_id=user_id,
+            user_id=card.user_id,
             item_id=new_item_id,
             name=new_name,
             is_multi_spec=new_is_multi_spec,
@@ -591,29 +597,55 @@ class CardService:
         await self.session.commit()
         return True
 
-    async def delete_card(self, card_id: int, user_id: int) -> bool:
-        """删除卡券（同时删除关联表记录）"""
-        # 先删除关联表记录
+    async def delete_card(self, card_id: int, user_id: int | None) -> bool:
+        """删除卡券（同时删除关联表记录）
+
+        Args:
+            user_id: 用户ID，None 表示管理员（不限制归属）
+        """
+        # 先校验归属：归属不符时直接返回，不动关联表（旧逻辑先删关联再验归属，
+        # 会把他人卡券的关联记录删掉而卡券本身删不掉）
+        conditions = [Card.id == card_id]
+        if user_id is not None:
+            conditions.append(Card.user_id == user_id)
+        card = (await self.session.execute(select(Card).where(*conditions))).scalars().first()
+        if not card:
+            return False
+
         matcher = CardMatcher(self.session)
         rel_count = await matcher.delete_relations_by_card_id(card_id)
         if rel_count > 0:
             logger.info(f"删除卡券 {card_id} 的 {rel_count} 条关联记录")
-        
-        stmt = delete(Card).where(Card.id == card_id, Card.user_id == user_id)
+
+        stmt = delete(Card).where(Card.id == card_id)
         result = await self.session.execute(stmt)
         await self.session.commit()
         return result.rowcount > 0
 
-    async def batch_delete_cards(self, card_ids: List[int], user_id: int) -> int:
-        """批量删除卡券（同时删除关联表记录）"""
-        # 先批量删除关联表记录
+    async def batch_delete_cards(self, card_ids: List[int], user_id: int | None) -> int:
+        """批量删除卡券（同时删除关联表记录）
+
+        Args:
+            user_id: 用户ID，None 表示管理员（不限制归属）
+        """
+        # 先取出归属范围内的卡券 ID，只删这些卡券的关联（旧逻辑先删全部
+        # 传入 card_id 的关联，再按归属删卡券，会误删他人卡券的关联）
+        conditions = [Card.id.in_(card_ids)]
+        if user_id is not None:
+            conditions.append(Card.user_id == user_id)
+        owned_ids = list(
+            (await self.session.execute(select(Card.id).where(*conditions))).scalars().all()
+        )
+        if not owned_ids:
+            return 0
+
         matcher = CardMatcher(self.session)
-        for card_id in card_ids:
+        for card_id in owned_ids:
             rel_count = await matcher.delete_relations_by_card_id(card_id)
             if rel_count > 0:
                 logger.info(f"删除卡券 {card_id} 的 {rel_count} 条关联记录")
-        
-        stmt = delete(Card).where(Card.id.in_(card_ids), Card.user_id == user_id)
+
+        stmt = delete(Card).where(Card.id.in_(owned_ids))
         result = await self.session.execute(stmt)
         await self.session.commit()
         return result.rowcount

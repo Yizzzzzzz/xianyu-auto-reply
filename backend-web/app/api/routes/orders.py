@@ -250,10 +250,10 @@ async def get_order_detail(
     if not order:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="订单不存在")
 
-    # 验证订单属于当前用户（管理员可查看所有）
+    # 验证订单属于当前用户（管理员可查看所有），不符返回 404 不泄露存在性
     _, is_admin = resolve_owner_scope(current_user)
     if not is_admin and order.owner_id != current_user.id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权查看此订单")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="订单不存在")
     
     if refresh and order.account_id:
         try:
@@ -356,7 +356,8 @@ async def delete_order(
     order_service: OrderService = Depends(deps.get_order_service),
 ):
     """删除订单"""
-    success = await order_service.delete_order(order_id, current_user.id)
+    owner_id, _ = resolve_owner_scope(current_user)
+    success = await order_service.delete_order(order_id, owner_id)
     if not success:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="订单不存在或无权删除")
     return ApiResponse(success=True, message="删除成功")
@@ -372,11 +373,11 @@ async def no_logistics_delivery(
     """无物流发货：仅在闲鱼确认发货，不发送任何卡券或聊天内容"""
     order = await order_service.get_order_by_no(request.order_no)
     if not order:
-        return ApiResponse(success=False, message="订单不存在")
+        return ApiResponse(success=False, message="订单不存在或无权操作")
 
     owner_id, is_admin = resolve_owner_scope(current_user)
     if not is_admin and order.owner_id != current_user.id:
-        return ApiResponse(success=False, message="无权操作此订单")
+        return ApiResponse(success=False, message="订单不存在或无权操作")
     if order.status not in {"pending_ship", "pending", "paid", "待发货"}:
         return ApiResponse(success=False, message="只有待发货订单可以发货")
     if not order.account_id or not order.item_id or not order.buyer_id:
@@ -412,10 +413,10 @@ async def cancel_order(
     """卖家关闭（取消）一笔待处理订单"""
     order = await order_service.get_order_by_no(request.order_no)
     if not order:
-        return ApiResponse(success=False, message="订单不存在")
+        return ApiResponse(success=False, message="订单不存在或无权操作")
     owner_id, is_admin = resolve_owner_scope(current_user)
     if not is_admin and order.owner_id != current_user.id:
-        return ApiResponse(success=False, message="无权操作此订单")
+        return ApiResponse(success=False, message="订单不存在或无权操作")
     if order.status not in {"pending_payment", "pending_ship", "pending", "paid", "待付款", "待发货"}:
         return ApiResponse(success=False, message="当前订单状态不可取消")
     if not order.account_id:
@@ -455,10 +456,10 @@ async def manual_delivery(
         
         logger.info(f"订单信息: account_id={order.account_id}, item_id={order.item_id}, chat_id={order.chat_id}, buyer_id={order.buyer_id}")
         
-        # 管理员可以操作所有订单，普通用户只能操作自己的订单
+        # 管理员可以操作所有订单，普通用户只能操作自己的订单（不符返回 404 不泄露存在性）
         owner_id, is_admin = resolve_owner_scope(current_user)
         if not is_admin and order.owner_id != current_user.id:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权操作此订单")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="订单不存在")
 
         if order.card_only_delivered:
             return ApiResponse(

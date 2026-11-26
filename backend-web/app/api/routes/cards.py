@@ -5,12 +5,15 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api import deps
 from common.models.user import User
+from common.models.xy_account import XYAccount
+from common.models.xy_catalog_item import XYCatalogItem
 from common.schemas.common import ApiResponse
-from common.utils.auth_scope import resolve_owner_scope
+from common.utils.auth_scope import is_admin_user, resolve_owner_scope
 from common.utils.local_image_upload import ImageUploadError, save_uploaded_image
 from app.services.card_service import CardService
 from app.services.selectable_card_service import SelectableCardService
@@ -126,6 +129,37 @@ class UpdateItemCardsRequest(BaseModel):
 
 async def get_card_service(session: AsyncSession = Depends(deps.get_db_session)) -> CardService:
     return CardService(session)
+
+
+async def _resolve_binding_owner(
+    session: AsyncSession, item_ids: list[str], current_user: User
+) -> int | None:
+    """解析一批商品共同的卡券绑定归属人。
+
+    全部商品须在商品目录中且归属同一用户：普通用户只能是本人；
+    管理员可代操作任一用户的商品，但一批商品须归属同一人。
+    不满足（有商品不在目录、归属多人、普通用户碰他人商品）返回 None，
+    调用方按“商品不存在或无权操作”处理。关联行与新建卡券都以该
+    归属人落库，避免把卡券绑到他人商品上。
+    """
+    stmt = (
+        select(XYCatalogItem.item_id, XYAccount.owner_id)
+        .join(XYAccount, XYAccount.id == XYCatalogItem.account_pk)
+        .where(XYCatalogItem.item_id.in_(item_ids))
+    )
+    rows = (await session.execute(stmt)).all()
+    owners = dict(rows)
+    if len(rows) != len(owners):
+        return None  # 同一 item_id 在目录中有多条归属不同的记录，归属不明
+    if len(owners) != len(set(item_ids)):
+        return None
+    unique_owners = set(owners.values())
+    if len(unique_owners) != 1:
+        return None
+    owner = unique_owners.pop()
+    if not is_admin_user(current_user) and owner != current_user.id:
+        return None
+    return owner
 
 
 def _validate_card_payload(data: Any, *, validate_fee_payer: bool = True) -> Optional[str]:
@@ -308,7 +342,8 @@ async def update_card(
     # type字段保持不变，模型字段就是type
     
     try:
-        success = await card_service.update_card(card_id, current_user.id, **update_data)
+        owner_id, _ = resolve_owner_scope(current_user)
+        success = await card_service.update_card(card_id, owner_id, **update_data)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     
@@ -324,7 +359,8 @@ async def delete_card(
     card_service: CardService = Depends(get_card_service),
 ):
     """删除卡券"""
-    success = await card_service.delete_card(card_id, current_user.id)
+    owner_id, _ = resolve_owner_scope(current_user)
+    success = await card_service.delete_card(card_id, owner_id)
     if success:
         return {"message": "卡券删除成功"}
     raise HTTPException(status_code=404, detail="卡券不存在")
@@ -360,7 +396,8 @@ async def batch_delete_cards(
     card_service: CardService = Depends(get_card_service),
 ):
     """批量删除卡券"""
-    success_count = await card_service.batch_delete_cards(request.ids, current_user.id)
+    owner_id, _ = resolve_owner_scope(current_user)
+    success_count = await card_service.batch_delete_cards(request.ids, owner_id)
     
     return ApiResponse(
         success=True,
@@ -379,6 +416,10 @@ async def get_card_items(
     card_service: CardService = Depends(get_card_service),
 ):
     """获取卡券关联的商品ID列表"""
+    owner_id, _ = resolve_owner_scope(current_user)
+    card = await card_service.get_card_by_id(card_id, owner_id)
+    if not card:
+        raise HTTPException(status_code=404, detail="卡券不存在")
     item_ids = await card_service.get_card_item_ids(card_id)
     return ApiResponse(success=True, data={"item_ids": item_ids})
 
@@ -389,11 +430,23 @@ async def update_card_items(
     request: UpdateCardItemsRequest,
     current_user: User = Depends(deps.get_current_active_user),
     card_service: CardService = Depends(get_card_service),
+    session: AsyncSession = Depends(deps.get_db_session),
 ):
     """更新卡券关联的商品列表（先删旧关联再插新关联）"""
+    # 先校验卡券归属：服务层按 card_id 全量删除旧关联，不校验归属，
+    # 未校验时任意用户可用他人 card_id 覆盖其全部商品关联
+    owner_id, _ = resolve_owner_scope(current_user)
+    card = await card_service.get_card_by_id(card_id, owner_id)
+    if not card:
+        raise HTTPException(status_code=404, detail="卡券不存在")
+    # 再校验商品归属：未校验时可把自己的卡券绑到他人商品上，对方商品
+    # 出单时会错误发出自己的卡券
+    binding_owner = await _resolve_binding_owner(session, request.item_ids, current_user)
+    if binding_owner is None:
+        raise HTTPException(status_code=404, detail="商品不存在或无权操作")
     result = await card_service.update_card_item_relations(
         card_id=card_id,
-        user_id=current_user.id,
+        user_id=binding_owner,
         item_ids=request.item_ids,
     )
     return ApiResponse(
@@ -408,6 +461,7 @@ async def batch_bind_cards(
     request: BatchBindRequest,
     current_user: User = Depends(deps.get_current_active_user),
     card_service: CardService = Depends(get_card_service),
+    session: AsyncSession = Depends(deps.get_db_session),
 ):
     """批量绑定卡券到商品（通过关联表，不再复制卡券）"""
     if not request.card_ids:
@@ -415,11 +469,40 @@ async def batch_bind_cards(
     if not request.item_ids:
         return ApiResponse(success=False, message="请至少选择一个商品")
 
+    # 先校验每张卡券归属：服务层按 card_id 直接写入关联，不校验卡券归属，
+    # 未校验时可用他人 card_id 把他人卡券绑到自己商品上
+    owner_id, _ = resolve_owner_scope(current_user)
+    owned_card_ids: list[int] = []
+    skipped = 0
+    for card_id in request.card_ids:
+        card = await card_service.get_card_by_id(card_id, owner_id)
+        if card:
+            owned_card_ids.append(card_id)
+        else:
+            skipped += 1
+    if not owned_card_ids:
+        return ApiResponse(
+            success=False,
+            message="所选卡券不存在或无权操作",
+            data={"success_count": 0, "fail_count": len(request.card_ids)},
+        )
+
+    # 再校验商品归属：未校验时可把卡券绑到他人商品上，对方商品
+    # 出单时会错误发出自己的卡券
+    binding_owner = await _resolve_binding_owner(session, request.item_ids, current_user)
+    if binding_owner is None:
+        return ApiResponse(
+            success=False,
+            message="所选商品不存在或无权操作",
+            data={"success_count": 0, "fail_count": len(request.card_ids) * len(request.item_ids)},
+        )
+
     result = await card_service.batch_bind_cards_to_items(
-        user_id=current_user.id,
-        card_ids=request.card_ids,
+        user_id=binding_owner,
+        card_ids=owned_card_ids,
         item_ids=request.item_ids,
     )
+    result["fail_count"] = result.get("fail_count", 0) + skipped
 
     return ApiResponse(
         success=True,
@@ -433,10 +516,16 @@ async def batch_save_card(
     request: BatchSaveCardRequest,
     current_user: User = Depends(deps.get_current_active_user),
     card_service: CardService = Depends(get_card_service),
+    session: AsyncSession = Depends(deps.get_db_session),
 ):
     """批量保存卡券到多个商品（创建一个卡券并通过关联表绑定到多个商品）"""
     if not request.item_ids:
         return ApiResponse(success=False, message="请至少选择一个商品")
+
+    # 先校验商品归属：未校验时新建卡券会被绑到他人商品上
+    binding_owner = await _resolve_binding_owner(session, request.item_ids, current_user)
+    if binding_owner is None:
+        return ApiResponse(success=False, message="所选商品不存在或无权操作")
 
     # 多规格 / 图片数量 校验（与 create_card / update_card 共用 helper；
     # 本接口历史上不做 fee_payer 校验，传 validate_fee_payer=False 保持原有行为）
@@ -446,7 +535,7 @@ async def batch_save_card(
 
     try:
         result = await card_service.batch_save_and_bind(
-            user_id=current_user.id,
+            user_id=binding_owner,
             item_ids=request.item_ids,
             name=request.name,
             card_type=request.type,
@@ -486,6 +575,11 @@ async def delete_card_item_relation(
     card_service: CardService = Depends(get_card_service),
 ):
     """删除指定卡券与指定商品的关联关系"""
+    # 先校验卡券归属：服务层按 card_id/item_id 直接删除，不校验归属
+    owner_id, _ = resolve_owner_scope(current_user)
+    card = await card_service.get_card_by_id(card_id, owner_id)
+    if not card:
+        return ApiResponse(success=False, message="未找到该关联关系")
     success = await card_service.delete_card_item_relation(card_id, item_id)
     if success:
         return ApiResponse(success=True, message="已删除关联关系")
@@ -498,8 +592,13 @@ async def update_item_cards(
     request: UpdateItemCardsRequest,
     current_user: User = Depends(deps.get_current_active_user),
     card_service: CardService = Depends(get_card_service),
+    session: AsyncSession = Depends(deps.get_db_session),
 ):
     """更新商品关联的卡券列表（先删旧关联再插新关联）"""
+    # 先校验商品归属：未校验时可改他人商品的全部卡券关联
+    binding_owner = await _resolve_binding_owner(session, [item_id], current_user)
+    if binding_owner is None:
+        raise HTTPException(status_code=404, detail="商品不存在或无权操作")
     # 转换为内部格式
     card_relations = [
         {"card_id": item.card_id, "source": item.source, "dock_record_id": item.dock_record_id}
@@ -507,12 +606,15 @@ async def update_item_cards(
     ]
     result = await card_service.update_item_card_relations(
         item_id=item_id,
-        user_id=current_user.id,
+        user_id=binding_owner,
         card_relations=card_relations,
     )
+    message = f"已更新关联卡券（新增 {result['added']}，移除 {result['removed']}）"
+    if result.get("skipped"):
+        message += f"，已跳过 {result['skipped']} 条无权关联"
     return ApiResponse(
         success=True,
-        message=f"已更新关联卡券（新增 {result['added']}，移除 {result['removed']}）",
+        message=message,
         data=result,
     )
 
@@ -522,14 +624,34 @@ async def batch_clear_item_relations(
     request: BatchClearItemRelationsRequest,
     current_user: User = Depends(deps.get_current_active_user),
     card_service: CardService = Depends(get_card_service),
+    session: AsyncSession = Depends(deps.get_db_session),
 ):
     """批量清空商品的卡券关联关系（不删除卡券本身）"""
     if not request.item_ids:
         return ApiResponse(success=False, message="请至少选择一个商品")
 
-    removed = await card_service.batch_clear_item_relations(request.item_ids)
+    # 服务层按 item_id 全量删除关联，不校验商品归属；先在路由层按
+    # 商品目录（XYCatalogItem → XYAccount.owner_id）过滤出本人商品，
+    # 目录中查不到的商品一律不清空（fail-closed），管理员不过滤
+    owner_id, is_admin = resolve_owner_scope(current_user)
+    allowed_item_ids = request.item_ids
+    if not is_admin:
+        stmt = (
+            select(XYCatalogItem.item_id)
+            .join(XYAccount, XYAccount.id == XYCatalogItem.account_pk)
+            .where(
+                XYCatalogItem.item_id.in_(request.item_ids),
+                XYAccount.owner_id == owner_id,
+            )
+            .distinct()
+        )
+        allowed_item_ids = list((await session.execute(stmt)).scalars().all())
+        if not allowed_item_ids:
+            return ApiResponse(success=False, message="所选商品不存在或无权操作", data={"removed": 0})
+
+    removed = await card_service.batch_clear_item_relations(allowed_item_ids)
     return ApiResponse(
         success=True,
-        message=f"已清空 {len(request.item_ids)} 个商品的卡券关联（共删除 {removed} 条关联记录）",
+        message=f"已清空 {len(allowed_item_ids)} 个商品的卡券关联（共删除 {removed} 条关联记录）",
         data={"removed": removed},
     )

@@ -131,9 +131,9 @@ async def get_feedback_detail(
     if not feedback:
         return ApiResponse(success=False, message="反馈不存在")
     
-    # 非管理员只能看自己的反馈
+    # 非管理员只能看自己的反馈；归属不符时返回与不存在相同的提示，避免泄露存在性
     if current_user.role != UserRole.ADMIN and feedback.user_id != current_user.id:
-        return ApiResponse(success=False, message="无权查看此反馈")
+        return ApiResponse(success=False, message="反馈不存在")
     
     # 获取对话消息（按时间升序）
     msg_query = (
@@ -243,9 +243,9 @@ async def reply_feedback(
     if not feedback:
         return ApiResponse(success=False, message="反馈不存在")
     
-    # 非管理员只能回复自己的反馈
+    # 非管理员只能回复自己的反馈；归属不符时返回与不存在相同的提示，避免泄露存在性
     if current_user.role != UserRole.ADMIN and feedback.user_id != current_user.id:
-        return ApiResponse(success=False, message="无权回复此反馈")
+        return ApiResponse(success=False, message="反馈不存在")
     
     # 创建消息，XSS转义
     message = FeedbackMessage(
