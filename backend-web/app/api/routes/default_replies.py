@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api import deps
 from common.models.user import User
-from common.utils.auth_scope import resolve_owner_scope
+from common.utils.auth_scope import resolve_account_owner_scope
 from common.utils.local_image_upload import ImageUploadError, save_uploaded_image
 from common.utils.default_reply_api import validate_api_url, normalize_api_timeout
 from common.utils.default_reply_location import EXTERNAL_CONTACT_REPLY_TYPE, validate_external_contact_fields
@@ -54,7 +54,7 @@ async def get_default_reply(
 ):
     """获取指定账号的默认回复设置"""
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     account = await account_service.get_account_for_user(owner_id, account_id)
     if not account:
         raise HTTPException(status_code=404, detail="账号不存在")
@@ -88,7 +88,7 @@ async def update_default_reply(
 ):
     """更新指定账号的默认回复设置"""
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     account = await account_service.get_account_for_user(owner_id, account_id)
     if not account:
         raise HTTPException(status_code=404, detail="账号不存在")
@@ -159,7 +159,7 @@ async def upload_default_reply_image(
 ):
     """上传默认回复图片"""
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     account = await account_service.get_account_for_user(owner_id, account_id)
     if not account:
         raise HTTPException(status_code=404, detail="账号不存在")
@@ -187,7 +187,7 @@ async def get_all_default_replies(
     reply_service: DefaultReplyService = Depends(get_default_reply_service),
 ):
     """获取当前用户所有账号的默认回复设置"""
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     account_ids = await account_service.list_account_ids(owner_id)
     
     return await reply_service.get_all_default_replies(account_ids)
@@ -202,7 +202,7 @@ async def delete_default_reply(
 ):
     """删除指定账号的默认回复设置"""
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     account = await account_service.get_account_for_user(owner_id, account_id)
     if not account:
         raise HTTPException(status_code=404, detail="账号不存在")
@@ -222,7 +222,7 @@ async def clear_default_reply_records(
 ):
     """清空指定账号的默认回复记录"""
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     account = await account_service.get_account_for_user(owner_id, account_id)
     if not account:
         raise HTTPException(status_code=404, detail="账号不存在")

@@ -29,7 +29,7 @@ from app.services.auto_relist_rule_service import AutoRelistRuleService
 from app.services.auto_relist_serializers import serialize_auto_relist_event, serialize_auto_relist_rule
 from common.models.user import User, UserRole
 from common.schemas.common import ApiResponse
-from common.utils.auth_scope import resolve_owner_scope
+from common.utils.auth_scope import resolve_account_owner_scope
 from common.utils.local_image_upload import ImageUploadError, save_uploaded_image
 from common.utils.local_video_upload import VideoUploadError, save_uploaded_video
 from app.core.paths import get_upload_path
@@ -809,7 +809,7 @@ async def get_batch_status(
     unknown_sync_message = "批量任务同步状态缓存不存在，无法判断自动获取商品结果"
 
     # 管理员看全部批次，普通用户只看自己的发布日志
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     log_conditions = [PublishLog.batch_id == batch_id]
     if owner_id is not None:
         log_conditions.append(PublishLog.user_id == owner_id)

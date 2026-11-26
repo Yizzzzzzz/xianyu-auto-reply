@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api import deps
 from common.models.user import User
 from common.schemas.common import ApiResponse
-from common.utils.auth_scope import resolve_owner_scope
+from common.utils.auth_scope import resolve_account_owner_scope
 from common.utils.default_reply_api import validate_api_url, normalize_api_timeout
 from common.utils.default_reply_location import EXTERNAL_CONTACT_REPLY_TYPE, validate_external_contact_fields
 from common.models.user_setting import UserSetting
@@ -98,7 +98,7 @@ async def list_items(
     item_service: ItemService = Depends(deps.get_item_service),
 ) -> Dict[str, List[dict]]:
     """获取商品列表，管理员可查看所有商品"""
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     items = await item_service.list_items(owner_id)
     return {"items": items}
 
@@ -125,7 +125,7 @@ async def list_items_paginated(
     - is_multi_spec: 多规格（true/false）
     - multi_quantity_delivery: 多数量发货（true/false）
     """
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     items, total = await item_service.list_items_paginated(
         owner_id=owner_id,
         account_id=cookie_id,
@@ -157,7 +157,7 @@ async def list_selectable_items_all(
 
     仅返回 item_id/title/price 轻字段，管理员可查看所有商品。
     """
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     items = await SelectableItemService(session).get_all_selectable_item_keys(
         owner_id=owner_id,
         search=keyword or "",
@@ -176,7 +176,7 @@ async def list_items_by_card(
     仅返回 item_id/title/price；已删除商品不在此返回，选中态由
     GET /cards/{card_id}/items 提供，保存时不丢失。
     """
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     items = await SelectableItemService(session).get_associated_items(
         card_id=card_id,
         owner_id=owner_id,
@@ -191,13 +191,11 @@ async def list_items_by_cookie(
     account_service: AccountService = Depends(deps.get_account_service),
     item_service: ItemService = Depends(deps.get_item_service),
 ) -> Dict[str, List[dict]]:
-    """获取指定账号的商品列表，管理员可查看所有账号"""
-    owner_id, is_admin = resolve_owner_scope(current_user)
+    """获取指定账号的商品列表，闲鱼账号按 owner 隔离（管理员也只能看自己的号）"""
+    owner_id, _ = resolve_account_owner_scope(current_user)
 
-    if is_admin:
-        account = await account_service.get_account_by_identifier(cookie_id)
-    else:
-        account = await account_service.get_account_for_user(current_user.id, cookie_id)
+    # 闲鱼账号始终按 owner 隔离：不再走 get_account_by_identifier 旁路
+    account = await account_service.get_account_for_user(current_user.id, cookie_id)
 
     if not account:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="账号不存在")
@@ -237,7 +235,7 @@ async def get_item_default_reply(
 ) -> ApiResponse:
     """获取商品默认回复配置"""
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
 
     account = await account_service.get_account_for_user(owner_id, cookie_id)
     if not account:
@@ -302,7 +300,7 @@ async def save_item_default_reply(
 ) -> ApiResponse:
     """保存商品默认回复配置"""
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
 
     account = await account_service.get_account_for_user(owner_id, cookie_id)
     if not account:
@@ -383,7 +381,7 @@ async def upload_item_default_reply_image(
 ):
     """上传商品默认回复图片"""
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
 
     account = await account_service.get_account_for_user(owner_id, cookie_id)
     if not account:
@@ -415,7 +413,7 @@ async def delete_item_default_reply(
 ) -> ApiResponse:
     """删除商品默认回复配置"""
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
 
     account = await account_service.get_account_for_user(owner_id, cookie_id)
     if not account:
@@ -459,7 +457,7 @@ async def upload_batch_default_reply_image(
 ):
     """上传批量默认回复图片"""
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
 
     account = await account_service.get_account_for_user(owner_id, cookie_id)
     if not account:
@@ -491,7 +489,7 @@ async def batch_save_item_default_reply(
 ) -> ApiResponse:
     """批量保存商品默认回复配置"""
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
 
     account = await account_service.get_account_for_user(owner_id, cookie_id)
     if not account:
@@ -566,7 +564,7 @@ async def batch_delete_item_default_reply(
 ) -> ApiResponse:
     """批量删除商品默认回复配置"""
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
 
     account = await account_service.get_account_for_user(owner_id, cookie_id)
     if not account:
@@ -601,7 +599,7 @@ async def get_item_ai_prompt(
 ) -> ApiResponse:
     """获取商品AI提示词配置"""
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
 
     account = await account_service.get_account_for_user(owner_id, cookie_id)
     if not account:
@@ -636,7 +634,7 @@ async def save_item_ai_prompt(
 ) -> ApiResponse:
     """保存商品AI提示词配置"""
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
 
     account = await account_service.get_account_for_user(owner_id, cookie_id)
     if not account:
@@ -668,7 +666,7 @@ async def batch_delete_item_ai_prompt(
 ) -> ApiResponse:
     """批量删除商品AI提示词配置"""
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
 
     account = await account_service.get_account_for_user(owner_id, cookie_id)
     if not account:
@@ -701,7 +699,7 @@ async def batch_save_item_ai_prompt(
 ) -> ApiResponse:
     """批量保存商品AI提示词配置"""
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
 
     account = await account_service.get_account_for_user(owner_id, cookie_id)
     if not account:
@@ -729,7 +727,7 @@ async def refresh_item_detail(
     item_service: ItemService = Depends(deps.get_item_service),
 ) -> ApiResponse:
     """从闲鱼平台刷新商品详情（浏览/想要/收藏数、文案、图片）。"""
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     account = await account_service.get_account_for_user(owner_id, cookie_id)
     if not account:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="账号不存在")
@@ -751,7 +749,7 @@ async def get_item_detail(
     item_service: ItemService = Depends(deps.get_item_service),
 ) -> Dict[str, dict]:
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
 
     account = await account_service.get_account_for_user(owner_id, cookie_id)
     if not account:
@@ -773,7 +771,7 @@ async def update_item(
 ) -> ApiResponse:
     """更新商品信息"""
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
 
     logger.info(f"更新商品: cookie_id={cookie_id}, item_id={item_id}, payload={payload}")
     account = await account_service.get_account_for_user(owner_id, cookie_id)
@@ -797,7 +795,7 @@ async def update_item_multi_spec(
 ) -> ApiResponse:
     """更新商品的多规格状态"""
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
 
     account = await account_service.get_account_for_user(owner_id, cookie_id)
     if not account:
@@ -826,7 +824,7 @@ async def update_item_price(
     仅鱼小铺账号可用；服务层会校验账号类型并返回 success=False。
     """
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
 
     account = await account_service.get_account_for_user(owner_id, cookie_id)
     if not account:
@@ -857,7 +855,7 @@ async def get_seller_item_edit_detail(
     仅鱼小铺账号可用；非鱼小铺账号返回 success=False 由前端展示提示。
     """
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
 
     account = await account_service.get_account_for_user(owner_id, cookie_id)
     if not account:
@@ -893,7 +891,7 @@ async def update_personal_item(
     item_service: ItemService = Depends(deps.get_item_service),
 ) -> ApiResponse:
     """个人号商品编辑（标题、价格、描述）。直接同步到闲鱼平台并刷新本地商品。"""
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     account = await account_service.get_account_for_user(owner_id, cookie_id)
     if not account:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="账号不存在")
@@ -945,7 +943,7 @@ async def update_seller_item(
     未改动的图片/视频/宝贝所在地/发货设置直接复用平台数据。
     """
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
 
     account = await account_service.get_account_for_user(owner_id, cookie_id)
     if not account:
@@ -1008,7 +1006,7 @@ async def update_item_multi_quantity_delivery(
 ) -> ApiResponse:
     """更新商品的多数量发货状态"""
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
 
     account = await account_service.get_account_for_user(owner_id, cookie_id)
     if not account:
@@ -1043,7 +1041,7 @@ async def delete_item_unified(
     - 传入 cookie_id：校验账号归属后按账号删除；账号不存在直接报错。
     - 未传 cookie_id：若商品所属账号仍存在则要求指定账号；账号已删除（孤儿商品）则按商品ID删除。
     """
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
 
     account = None
     # 将 "null"、空字符串等无效值统一视为未传入 cookie_id
@@ -1070,7 +1068,7 @@ async def delete_item(
     item_service: ItemService = Depends(deps.get_item_service),
 ) -> ApiResponse:
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
 
     account = await account_service.get_account_for_user(owner_id, cookie_id)
     if not account:
@@ -1091,7 +1089,7 @@ async def batch_delete_items(
     from loguru import logger
 
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     accounts = await account_service.list_accounts(owner_id)
     account_map = {account.account_id: account for account in accounts}
     removed = 0
@@ -1127,7 +1125,7 @@ async def batch_offline_items(
     所选账号必须是这些商品的归属账号，否则闲鱼会对不属于该账号的商品返回失败。
     """
     # 管理员可操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
 
     if not payload.item_ids:
         return ApiResponse(success=False, message="请选择要下架的商品")
@@ -1173,7 +1171,7 @@ async def batch_delete_xianyu_items(
     平台删除成功的商品会同步删除本地商品记录及其卡券关联，保持本地与平台一致；
     平台删除失败的商品保留本地记录。本地清理失败不影响平台删除结果，仅记录日志。
     """
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     try:
         payload = await request.json()
     except Exception as exc:
@@ -1323,7 +1321,7 @@ async def fetch_items_from_account(
 ) -> Dict[str, Any]:
     """从闲鱼API获取指定页的商品列表"""
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
 
     account = await account_service.get_account_for_user(owner_id, payload.cookie_id)
     if not account:
@@ -1358,7 +1356,7 @@ async def fetch_all_items_from_account(
 ) -> Dict[str, Any]:
     """获取账号所有商品（自动遍历所有页）"""
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
 
     page_size = payload.page_size or 20
     max_pages = payload.max_pages

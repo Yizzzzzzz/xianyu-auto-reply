@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api import deps
 from common.models.user import User
 from common.schemas.common import ApiResponse
-from common.utils.auth_scope import resolve_owner_scope
+from common.utils.auth_scope import resolve_account_owner_scope
 from app.services.account_service import AccountService
 
 router = APIRouter(tags=["message-filters"])
@@ -206,7 +206,7 @@ async def get_message_filters(
 ):
     """获取消息过滤规则列表，支持按账号筛选，管理员可查看所有"""
     # 获取用户所有账号（管理员获取所有账号）
-    owner_id, is_admin = resolve_owner_scope(current_user)
+    owner_id, is_admin = resolve_account_owner_scope(current_user)
     account_ids = await account_service.list_account_ids(owner_id)
     
     if not account_ids:
@@ -258,7 +258,7 @@ async def create_message_filter(
     account_service: AccountService = Depends(deps.get_account_service),
 ):
     """创建消息过滤规则，支持多选filter_type生成多条记录"""
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
 
     account_id = filter_data.account_id.strip()
     if not account_id:
@@ -283,7 +283,7 @@ async def create_message_filters_batch(
     session: AsyncSession = Depends(deps.get_db_session),
     account_service: AccountService = Depends(deps.get_account_service),
 ):
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     requested_account_ids = _normalize_string_list(filter_data.account_ids)
     if not requested_account_ids:
         return ApiResponse(success=False, message="请至少选择一个账号")
@@ -324,7 +324,7 @@ async def update_message_filter(
         raise HTTPException(status_code=404, detail="规则不存在")
     
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     account = await account_service.get_account_for_user(owner_id, row.account_id)
     if not account:
         raise HTTPException(status_code=404, detail="规则不存在")
@@ -387,7 +387,7 @@ async def delete_message_filter(
         raise HTTPException(status_code=404, detail="规则不存在")
     
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     account = await account_service.get_account_for_user(owner_id, row.account_id)
     if not account:
         raise HTTPException(status_code=404, detail="规则不存在")
@@ -413,7 +413,7 @@ async def batch_delete_message_filters(
         return ApiResponse(success=False, message="请选择要删除的规则")
     
     # 获取用户所有账号（管理员为 None，取全部账号；普通用户仅本人账号）
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     user_account_ids = set(await account_service.list_account_ids(owner_id))
     
     # 查询要删除的规则
@@ -467,7 +467,7 @@ async def toggle_message_filter(
         raise HTTPException(status_code=404, detail="规则不存在")
     
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     account = await account_service.get_account_for_user(owner_id, row.account_id)
     if not account:
         raise HTTPException(status_code=404, detail="规则不存在")

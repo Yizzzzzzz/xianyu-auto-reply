@@ -45,7 +45,7 @@ from common.schemas.account import (
 from common.schemas.common import ApiResponse
 from common.services.ai_provider_service import read_ai_enabled
 from common.services.token_renewal_cache_service import delete_token_cache
-from common.utils.auth_scope import resolve_owner_scope
+from common.utils.auth_scope import resolve_account_owner_scope
 from common.utils.xianyu_utils import close_account_notice
 from app.services.account_service import AccountService
 from app.services.auto_reply_stats_service import AutoReplyStatsService
@@ -62,7 +62,7 @@ async def list_cookies(
     """Return the legacy list of cookie/account ids for the current user.
     管理员返回所有账号，普通用户返回自己的账号。
     """
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     return await account_service.list_account_ids(owner_id)
 
 
@@ -112,7 +112,7 @@ async def _get_batch_account_map(
     account_service: AccountService,
 ) -> tuple[list[str], dict[str, XYAccount]]:
     normalized_account_ids = _normalize_batch_account_ids(account_ids)
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     accounts = await account_service.get_accounts_for_user(owner_id, normalized_account_ids)
     return normalized_account_ids, {account.account_id: account for account in accounts}
 
@@ -154,7 +154,7 @@ async def list_cookie_options(
     account_service: AccountService = Depends(deps.get_account_service),
 ) -> list[AccountOption]:
     """返回账号下拉选项，避免非账号管理页面查询完整详情。"""
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     options = await account_service.list_account_options(owner_id)
     return [AccountOption(**item) for item in options]
 
@@ -169,7 +169,7 @@ async def list_cookie_details(
     管理员返回所有账号，普通用户返回自己的账号。
     """
     from sqlalchemy import text
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     accounts = await account_service.list_accounts(owner_id)
     
     # 获取所有账号的消息过滤规则数量
@@ -260,7 +260,7 @@ async def list_cookie_details_paginated(
     - disable_reason: 禁用原因关键词（LIKE 模糊搜索）
     - account_id: 账号ID关键词（LIKE 模糊搜索）
     """
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
 
     # 在线状态：口径与仪表盘“在线账号”一致（websocket 真实连接的账号集合）。
     # 同时用于：①在线/离线筛选条件；②列表每行的 online 字段展示。失败时按空集合处理。
@@ -393,19 +393,16 @@ async def _get_account_or_404(
 ) -> XYAccount:
     """
     获取账号，如果不存在或无权限则抛出404
-    
-    权限规则：
-    - 管理员可以访问所有账号
-    - 普通用户只能访问自己的账号
+
+    权限规则（闲鱼账号始终按 owner 隔离）：
+    - 所有用户（含管理员）只能访问自己 owner_id 的账号
+    - 删他人账号时返回 404
     """
     from loguru import logger
 
-    owner_id, is_admin = resolve_owner_scope(current_user)
-    # 管理员可以访问所有账号
-    if is_admin:
-        logger.info(f"管理员 {current_user.username} 访问账号 {account_id}，owner_id=None")
-    else:
-        logger.info(f"普通用户 {current_user.username} (ID:{current_user.id}) 访问账号 {account_id}，owner_id={owner_id}")
+    owner_id, is_admin = resolve_account_owner_scope(current_user)
+    # 闲鱼账号始终按 owner 隔离：管理员也只能访问自己的号
+    logger.info(f"用户 {current_user.username} (ID:{current_user.id}) 访问账号 {account_id}，owner_id={owner_id}")
     
     account = await account_service.get_account_for_user(owner_id, account_id)
     if not account:
@@ -933,7 +930,7 @@ async def get_account_stats(
     - total_keywords: 总关键词数
     - total_orders: 总订单数
     """
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     stats = await DashboardStatsService(session).get_account_dashboard_stats(
         current_user_id=current_user.id,
         account_scope_owner_id=owner_id,
@@ -958,7 +955,7 @@ async def get_order_amount_trend(
     - 管理员：汇总所有用户的所有账号订单金额
     - 排除已关闭/已取消的订单
     """
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     trend_data = await DashboardStatsService(session).get_order_amount_trend(owner_id=owner_id, days=30)
 
     return ApiResponse(success=True, message="获取订单金额趋势成功", data={"trend": trend_data})
@@ -986,7 +983,7 @@ async def export_accounts(
     """
     from app.services.account_export_service import AccountExportService
 
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     export_service = AccountExportService(session)
 
     account_ids = request.get("account_ids")
@@ -1066,7 +1063,7 @@ async def renew_account_login(
     from common.services.cookie_renew_api_service import cookie_renew_api_service
     from sqlalchemy import select
 
-    owner_id, is_admin = resolve_owner_scope(current_user)
+    owner_id, is_admin = resolve_account_owner_scope(current_user)
 
     results = []
     success_count = 0

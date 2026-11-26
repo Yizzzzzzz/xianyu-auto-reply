@@ -10,7 +10,7 @@ from common.models.user import User
 from common.schemas.ai_reply import AIModelListRequest, AIReplySettings, AIReplySettingsUpdate
 from common.schemas.common import ApiResponse
 from common.services.ai_provider_service import fetch_ai_model_list, test_ai_connection
-from common.utils.auth_scope import resolve_owner_scope
+from common.utils.auth_scope import resolve_account_owner_scope
 from app.services.account_service import AccountService
 from app.services.ai_reply_service import AIReplySettingsService
 
@@ -23,7 +23,7 @@ async def list_ai_reply_settings(
     current_user: User = Depends(deps.get_current_active_user),
     ai_service: AIReplySettingsService = Depends(deps.get_ai_reply_service),
 ) -> dict[str, AIReplySettings]:
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     return await ai_service.list_settings(owner_id)
 
 
@@ -68,7 +68,7 @@ async def get_ai_reply_settings(
     ai_service: AIReplySettingsService = Depends(deps.get_ai_reply_service),
 ) -> AIReplySettings:
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     account = await account_service.get_account_for_user(owner_id, cookie_id)
     if not account:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="账号不存在")
@@ -84,7 +84,7 @@ async def update_ai_reply_settings(
     ai_service: AIReplySettingsService = Depends(deps.get_ai_reply_service),
 ) -> ApiResponse:
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     account = await account_service.get_account_for_user(owner_id, cookie_id)
     if not account:
         return ApiResponse(success=False, message="账号不存在")
@@ -105,7 +105,7 @@ async def bulk_update_ai_settings(
     account_service: AccountService = Depends(deps.get_account_service),
     ai_service: AIReplySettingsService = Depends(deps.get_ai_reply_service),
 ) -> ApiResponse:
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     accounts = await account_service.list_accounts(owner_id)
     account_lookup = {account.account_id: account for account in accounts}
     updated = 0
@@ -135,7 +135,7 @@ async def test_ai_reply_settings(
 ) -> ApiResponse:
     """测试AI连接是否正常"""
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     account = await account_service.get_account_for_user(owner_id, cookie_id)
     if not account:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="账号不存在")

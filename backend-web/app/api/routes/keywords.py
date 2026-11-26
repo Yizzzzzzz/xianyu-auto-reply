@@ -11,7 +11,7 @@ from app.api import deps
 from common.models.user import User
 from common.schemas.common import ApiResponse
 from common.schemas.keyword import KeywordDetail, KeywordTextList, KeywordTextUpdatePayload
-from common.utils.auth_scope import resolve_owner_scope
+from common.utils.auth_scope import resolve_account_owner_scope
 from common.utils.local_image_upload import ImageUploadError, save_uploaded_image
 from app.services.account_service import AccountService
 from app.services.keyword_service import KeywordService
@@ -25,7 +25,7 @@ async def get_all_keywords(
     keyword_service: KeywordService = Depends(deps.get_keyword_service),
 ) -> list[KeywordDetail]:
     """获取当前用户所有账号的关键词列表，管理员可查看所有"""
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     keywords = await keyword_service.list_keywords_for_owner(owner_id)
     return [KeywordDetail(**item) for item in keywords]
 
@@ -37,14 +37,9 @@ async def get_keywords_with_item_id(
     account_service: AccountService = Depends(deps.get_account_service),
     keyword_service: KeywordService = Depends(deps.get_keyword_service),
 ) -> list[KeywordDetail]:
-    """获取关键词列表，管理员可查看所有账号"""
-    _, is_admin = resolve_owner_scope(current_user)
-
-    # 管理员可以查看任意账号，普通用户只能查看自己的
-    if is_admin:
-        account = await account_service.get_account_by_identifier(account_id)
-    else:
-        account = await account_service.get_account_for_user(current_user.id, account_id)
+    """获取关键词列表，闲鱼账号按 owner 隔离（管理员也只能看自己的号）"""
+    # 闲鱼账号始终按 owner 隔离：不再走 get_account_by_identifier 旁路
+    account = await account_service.get_account_for_user(current_user.id, account_id)
     
     if not account:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="账号不存在")
@@ -61,7 +56,7 @@ async def save_keywords_with_item_id(
     keyword_service: KeywordService = Depends(deps.get_keyword_service),
 ) -> ApiResponse:
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     account = await account_service.get_account_for_user(owner_id, account_id)
     if not account:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="账号不存在")
@@ -85,7 +80,7 @@ async def update_single_keyword(
     account_service: AccountService = Depends(deps.get_account_service),
     keyword_service: KeywordService = Depends(deps.get_keyword_service),
 ) -> ApiResponse:
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     source_account = await account_service.get_account_for_user(owner_id, account_id)
     if not source_account:
         return ApiResponse(success=False, message="原所属账号不存在")
@@ -129,7 +124,7 @@ async def export_keywords(
 ):
     """导出指定账号的关键词为Excel文件"""
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     account = await account_service.get_account_for_user(owner_id, account_id)
     if not account:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="账号不存在")
@@ -178,7 +173,7 @@ async def import_keywords(
 ):
     """导入Excel文件中的关键词到指定账号"""
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     account = await account_service.get_account_for_user(owner_id, account_id)
     if not account:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="账号不存在")
@@ -277,7 +272,7 @@ async def add_image_keyword(
 ):
     """添加图片关键词"""
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     account = await account_service.get_account_for_user(owner_id, account_id)
     if not account:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="账号不存在")
@@ -349,7 +344,7 @@ async def delete_single_keyword(
 ) -> ApiResponse:
     """删除单个关键词（支持文本和图片类型）"""
     # 管理员可以操作所有账号，普通用户只能操作自己的账号
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     account = await account_service.get_account_for_user(owner_id, account_id)
     if not account:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="账号不存在")

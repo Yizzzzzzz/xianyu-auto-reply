@@ -10,7 +10,7 @@ from app.api import deps
 from common.models.user import User
 from common.schemas.common import ApiResponse
 from common.schemas.order import OrderOut
-from common.utils.auth_scope import resolve_owner_scope
+from common.utils.auth_scope import resolve_account_owner_scope
 from app.services.account_service import AccountService
 from app.services.order_service import OrderService
 from app.services.card_service import CardService
@@ -80,7 +80,7 @@ async def list_orders(
     - start_date: 开始日期（YYYY-MM-DD）
     - end_date: 结束日期（YYYY-MM-DD）
     """
-    owner_id, is_admin = resolve_owner_scope(current_user)
+    owner_id, is_admin = resolve_account_owner_scope(current_user)
 
     if cookie_id and not is_admin:
         account = await account_service.get_account_for_user(current_user.id, cookie_id)
@@ -178,7 +178,7 @@ async def fetch_xianyu_orders(
     order_service: OrderService = Depends(deps.get_order_service),
 ):
     """获取闲鱼卖家订单并同步到数据库"""
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
 
     if request.cookie_id:
         account = await account_service.get_account_for_user(owner_id, request.cookie_id)
@@ -251,7 +251,7 @@ async def get_order_detail(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="订单不存在")
 
     # 验证订单属于当前用户（管理员可查看所有），不符返回 404 不泄露存在性
-    _, is_admin = resolve_owner_scope(current_user)
+    _, is_admin = resolve_account_owner_scope(current_user)
     if not is_admin and order.owner_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="订单不存在")
     
@@ -339,7 +339,7 @@ async def batch_delete_orders(
     if not request.ids:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请选择要删除的订单")
 
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
 
     result = await order_service.batch_delete_orders(request.ids, owner_id)
     return {
@@ -356,7 +356,7 @@ async def delete_order(
     order_service: OrderService = Depends(deps.get_order_service),
 ):
     """删除订单"""
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     success = await order_service.delete_order(order_id, owner_id)
     if not success:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="订单不存在或无权删除")
@@ -375,7 +375,7 @@ async def no_logistics_delivery(
     if not order:
         return ApiResponse(success=False, message="订单不存在或无权操作")
 
-    owner_id, is_admin = resolve_owner_scope(current_user)
+    owner_id, is_admin = resolve_account_owner_scope(current_user)
     if not is_admin and order.owner_id != current_user.id:
         return ApiResponse(success=False, message="订单不存在或无权操作")
     if order.status not in {"pending_ship", "pending", "paid", "待发货"}:
@@ -414,7 +414,7 @@ async def cancel_order(
     order = await order_service.get_order_by_no(request.order_no)
     if not order:
         return ApiResponse(success=False, message="订单不存在或无权操作")
-    owner_id, is_admin = resolve_owner_scope(current_user)
+    owner_id, is_admin = resolve_account_owner_scope(current_user)
     if not is_admin and order.owner_id != current_user.id:
         return ApiResponse(success=False, message="订单不存在或无权操作")
     if order.status not in {"pending_payment", "pending_ship", "pending", "paid", "待付款", "待发货"}:
@@ -457,7 +457,7 @@ async def manual_delivery(
         logger.info(f"订单信息: account_id={order.account_id}, item_id={order.item_id}, chat_id={order.chat_id}, buyer_id={order.buyer_id}")
         
         # 管理员可以操作所有订单，普通用户只能操作自己的订单（不符返回 404 不泄露存在性）
-        owner_id, is_admin = resolve_owner_scope(current_user)
+        owner_id, is_admin = resolve_account_owner_scope(current_user)
         if not is_admin and order.owner_id != current_user.id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="订单不存在")
 

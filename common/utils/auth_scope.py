@@ -50,7 +50,24 @@ def resolve_owner_scope(user: User) -> tuple[int | None, bool]:
     return (None if admin else user.id, admin)
 
 
+def resolve_account_owner_scope(user: User) -> tuple[int, bool]:
+    """解析闲鱼账号（xy_accounts）的数据访问作用域。
+
+    与 resolve_owner_scope() 不同：即使是管理员，也只能访问自己的闲鱼号。
+    平台上有多个 ADMIN 用户时，管理员之间默认也互相隔离，不能删/看对方的
+    闲鱼号。平台用户管理等管理类功能仍使用 resolve_owner_scope()，不受影响。
+
+    Args:
+        user: 当前登录用户对象
+
+    Returns:
+        (owner_id, is_admin) 元组，其中 owner_id 恒为 user.id（永不为 None）。
+    """
+    return (user.id, is_admin_user(user))
+
+
 __all__ = [
     "is_admin_user",
     "resolve_owner_scope",
+    "resolve_account_owner_scope",
 ]
