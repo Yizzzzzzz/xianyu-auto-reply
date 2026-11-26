@@ -13,6 +13,7 @@ from common.models.xy_order import XYOrder
 from common.models.card import Card
 from common.models.default_reply import DefaultReply, DefaultReplyRecord
 from common.models.ai_chat_message import AIChatMessage
+from common.models.ai_token_usage import AITokenUsage
 from common.models.risk_control_log import XYRiskControlLog as RiskControlLog
 from common.models.account_login_log import XYAccountLoginLog
 from common.models.user_login_log import XYUserLoginLog
@@ -90,6 +91,7 @@ __all__ = [
     "DefaultReply",
     "DefaultReplyRecord",
     "AIChatMessage",
+    "AITokenUsage",
     "RiskControlLog",
     "XYAccountLoginLog",
     "XYUserLoginLog",

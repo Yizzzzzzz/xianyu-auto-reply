@@ -797,6 +797,22 @@ class DatabaseInitializer:
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI聊天消息表';
         """,
 
+        # 13. AI Token 用量记录表
+        "xy_ai_token_usage": """
+            CREATE TABLE IF NOT EXISTS xy_ai_token_usage (
+                id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '记录ID',
+                owner_id INT NOT NULL COMMENT '平台用户ID',
+                provider_name VARCHAR(80) NOT NULL DEFAULT '' COMMENT '服务商名称',
+                model VARCHAR(100) NOT NULL DEFAULT '' COMMENT '模型名称',
+                feature VARCHAR(40) NOT NULL DEFAULT '' COMMENT '功能：generate_listing/pick_competitor/identify_item/chat',
+                prompt_tokens INT NOT NULL DEFAULT 0 COMMENT '输入token数',
+                completion_tokens INT NOT NULL DEFAULT 0 COMMENT '输出token数',
+                total_tokens INT NOT NULL DEFAULT 0 COMMENT '总token数',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                INDEX ix_ai_token_usage_owner_created (owner_id, created_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI Token 用量记录表';
+        """,
+
         # 14. 风控日志表
         "xy_risk_control_logs": """
             CREATE TABLE IF NOT EXISTS xy_risk_control_logs (

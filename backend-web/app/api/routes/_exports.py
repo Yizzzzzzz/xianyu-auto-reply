@@ -27,6 +27,7 @@ from . import (
     cards,
     card_dock,
     data_analysis,
+    token_usage_stats,
     distribution,
     chat_new,
     chat_new_ws,
@@ -205,6 +206,7 @@ api_router.include_router(shared_scan.router, tags=["共享多人扫码登录"])
 
 # 数据分析
 api_router.include_router(data_analysis.router, tags=["数据分析"])  # 已定义prefix="/data-analysis"
+api_router.include_router(token_usage_stats.router, tags=["Token用量统计"])  # 已定义prefix="/stats"
 
 # Goofish相关
 api_router.include_router(goofish_compass.router, tags=["Goofish数据罗盘"])  # 已定义prefix="/compass/goofish"

@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.ai_provider_crypto import decrypt_api_key
 from common.models.ai_provider_config import AiProviderConfig
+from common.models.ai_token_usage import AITokenUsage
 from common.models.system_setting import SystemSetting
 from common.services.ai_provider_service import build_openai_url, extract_response_error
 
@@ -392,10 +393,47 @@ class AiProviderFailoverService:
             return record.value
         return default
 
+    async def _record_usage(
+        self,
+        owner_id: int | None,
+        provider_name: str,
+        model: str,
+        feature: str,
+        usage: dict[str, Any] | None,
+    ) -> None:
+        """记录一次 AI 调用的 token 用量（尽力而为，失败不影响主流程）。"""
+        if owner_id is None:
+            return
+        try:
+            u = usage or {}
+            prompt_tokens = int(u.get("prompt_tokens") or 0)
+            completion_tokens = int(u.get("completion_tokens") or 0)
+            total_tokens = int(u.get("total_tokens") or (prompt_tokens + completion_tokens))
+            if total_tokens <= 0 and prompt_tokens <= 0 and completion_tokens <= 0:
+                return
+            self.session.add(
+                AITokenUsage(
+                    owner_id=owner_id,
+                    provider_name=provider_name or "",
+                    model=model or "",
+                    feature=feature,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=total_tokens,
+                )
+            )
+            await self.session.commit()
+        except Exception:
+            try:
+                await self.session.rollback()
+            except Exception:
+                pass
+
     async def generate_listing(
         self,
         image_bytes: bytes,
         hint: Optional[str] = None,
+        owner_id: Optional[int] = None,
     ) -> dict[str, Any]:
         """根据商品图片生成闲鱼发布文案（容灾轮询）
 
@@ -513,6 +551,7 @@ class AiProviderFailoverService:
                 provider.last_error = None
                 provider.last_used_at = datetime.now()
                 await self.session.commit()
+                await self._record_usage(owner_id, provider.name, provider.model, "generate_listing", resp_data.get("usage"))
 
                 return {
                     "title": listing["title"],
@@ -547,6 +586,7 @@ class AiProviderFailoverService:
         self,
         image_bytes: bytes,
         competitors: list[dict[str, object]],
+        owner_id: Optional[int] = None,
     ) -> dict[str, object]:
         """对照商品图片，从候选同款中挑最相关的一条并给出建议价（容灾轮询）
 
@@ -667,6 +707,7 @@ class AiProviderFailoverService:
                 provider.last_error = None
                 provider.last_used_at = datetime.now()
                 await self.session.commit()
+                await self._record_usage(owner_id, provider.name, provider.model, "pick_competitor", resp_data.get("usage"))
 
                 return {
                     "competitor_index": pick["index"],
@@ -699,6 +740,7 @@ class AiProviderFailoverService:
         self,
         image_bytes: bytes,
         hint: Optional[str] = None,
+        owner_id: Optional[int] = None,
     ) -> dict[str, Any]:
         """根据商品图片识别物品信息（容灾轮询）
 
@@ -822,6 +864,7 @@ class AiProviderFailoverService:
                 provider.last_error = None
                 provider.last_used_at = datetime.now()
                 await self.session.commit()
+                await self._record_usage(owner_id, provider.name, provider.model, "identify_item", resp_data.get("usage"))
 
                 return {
                     "name": identified["name"],
@@ -864,6 +907,7 @@ class AiProviderFailoverService:
     async def chat(
         self,
         messages: list[dict[str, Any]],
+        owner_id: Optional[int] = None,
     ) -> dict[str, Any]:
         """根据历史对话消息进行追问回复（容灾轮询）
 
@@ -956,6 +1000,7 @@ class AiProviderFailoverService:
                 provider.last_error = None
                 provider.last_used_at = datetime.now()
                 await self.session.commit()
+                await self._record_usage(owner_id, provider.name, provider.model, "chat", resp_data.get("usage"))
 
                 return {
                     "reply": raw_content,

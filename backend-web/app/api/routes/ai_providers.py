@@ -699,7 +699,7 @@ async def _extract_image_and_hint(request: Request) -> tuple[bytes, Optional[str
 @router.post("/generate-listing", response_model=GenerateListingResponse)
 async def generate_listing_endpoint(
     request: Request,
-    _: User = Depends(get_current_admin_user),
+    current_user: User = Depends(get_current_admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     """根据商品图片生成闲鱼发布标题、详情和分类（走容灾调度）
@@ -717,7 +717,7 @@ async def generate_listing_endpoint(
 
     service = AiProviderFailoverService(session=session)
     try:
-        result = await service.generate_listing(image_bytes=image_bytes, hint=user_hint)
+        result = await service.generate_listing(image_bytes=image_bytes, hint=user_hint, owner_id=current_user.id)
         return result
     except NoProviderConfiguredError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
@@ -731,7 +731,7 @@ async def generate_listing_endpoint(
 @router.post("/identify", response_model=IdentifyItemResponse)
 async def identify_item_endpoint(
     request: Request,
-    _: User = Depends(get_current_admin_user),
+    current_user: User = Depends(get_current_admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     """根据商品图片识别物品名称、分类、介绍与搜索词（走容灾调度）
@@ -749,7 +749,7 @@ async def identify_item_endpoint(
 
     service = AiProviderFailoverService(session=session)
     try:
-        result = await service.identify_item(image_bytes=image_bytes, hint=user_hint)
+        result = await service.identify_item(image_bytes=image_bytes, hint=user_hint, owner_id=current_user.id)
         return result
     except NoProviderConfiguredError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
@@ -763,7 +763,7 @@ async def identify_item_endpoint(
 @router.post("/pick-competitor", response_model=PickCompetitorResponse)
 async def pick_competitor_endpoint(
     request: Request,
-    _: User = Depends(get_current_admin_user),
+    current_user: User = Depends(get_current_admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     """对照商品主图，从候选同款中挑最相关的一条并推断建议价（走容灾调度）
@@ -815,7 +815,7 @@ async def pick_competitor_endpoint(
 
     service = AiProviderFailoverService(session=session)
     try:
-        result = await service.pick_competitor(image_bytes=image_bytes, competitors=competitors)
+        result = await service.pick_competitor(image_bytes=image_bytes, competitors=competitors, owner_id=current_user.id)
         index = int(result["competitor_index"])
         picked = competitors[index]
         return {
@@ -838,7 +838,7 @@ async def pick_competitor_endpoint(
 @router.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(
     request: Request,
-    _: User = Depends(get_current_admin_user),
+    current_user: User = Depends(get_current_admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     """多轮对话追问（走容灾调度）
@@ -876,7 +876,7 @@ async def chat_endpoint(
 
     service = AiProviderFailoverService(session=session)
     try:
-        result = await service.chat(messages=normalized_messages)
+        result = await service.chat(messages=normalized_messages, owner_id=current_user.id)
         return result
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
