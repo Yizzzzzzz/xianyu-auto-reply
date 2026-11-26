@@ -485,6 +485,7 @@ async def _create_shared_scan_worker(
         xianyu_session_id=xianyu_session_id,
         status="qrcode_ready",
         qr_code_url=qr_code_url,
+        user_id=session.owner_id,
     )
     db.add(worker)
     await db.commit()
@@ -580,6 +581,7 @@ async def _handle_scan_success(
 
         worker.status = "success"
         worker.account_id = unb
+        worker.user_id = owner_id
         worker.cookie_saved = True
         await db.commit()
         await db.refresh(account)

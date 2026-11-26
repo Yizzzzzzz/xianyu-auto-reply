@@ -242,7 +242,9 @@ async def get_item_default_reply(
         return ApiResponse(success=False, message="账号不存在")
     
     try:
-        reply_config = await default_reply_service.get_item_default_reply(cookie_id, item_id)
+        reply_config = await default_reply_service.get_item_default_reply(
+            cookie_id, item_id, owner_id=owner_id
+        )
         
         if reply_config:
             return ApiResponse(
@@ -339,6 +341,7 @@ async def save_item_default_reply(
             account_id=cookie_id,
             item_id=item_id,
             reply_content=payload.reply_content,
+            owner_id=owner_id,
             reply_image=payload.reply_image,
             enabled=payload.enabled,
             reply_once=payload.reply_once,
@@ -420,7 +423,9 @@ async def delete_item_default_reply(
         return ApiResponse(success=False, message="账号不存在")
     
     try:
-        success = await default_reply_service.delete_item_default_reply(cookie_id, item_id)
+        success = await default_reply_service.delete_item_default_reply(
+            cookie_id, item_id, owner_id=owner_id
+        )
         
         if success:
             return ApiResponse(success=True, message="商品默认回复已删除")
@@ -532,6 +537,7 @@ async def batch_save_item_default_reply(
             account_id=cookie_id,
             item_id=item_id,
             reply_content=payload.reply_content,
+            owner_id=owner_id,
             reply_image=payload.reply_image,
             enabled=payload.enabled,
             reply_once=payload.reply_once,
@@ -575,7 +581,9 @@ async def batch_delete_item_default_reply(
 
     return await _execute_batch_item_operation(
         item_ids=payload.item_ids,
-        operation=lambda item_id: default_reply_service.delete_item_default_reply(cookie_id, item_id),
+        operation=lambda item_id: default_reply_service.delete_item_default_reply(
+            cookie_id, item_id, owner_id=owner_id
+        ),
         action_verb="删除",
         subject="默认回复",
     )

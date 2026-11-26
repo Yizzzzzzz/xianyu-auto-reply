@@ -122,6 +122,7 @@ class PublishAddressService:
         payload = await self._normalize_payload(data, partial=False)
         address = PublishAddress(
             created_by=operator_user_id,
+            user_id=operator_user_id,
             **payload,
         )
         self.session.add(address)
@@ -134,10 +135,18 @@ class PublishAddressService:
         stmt = select(PublishAddress).where(PublishAddress.id == address_id)
         return (await self.session.execute(stmt)).scalar_one_or_none()
 
-    async def update(self, address_id: int, data: dict) -> PublishAddress | None:
+    async def update(
+        self, address_id: int, data: dict, operator_user_id: int | None = None
+    ) -> PublishAddress | None:
         """更新随机地址。"""
         address = await self.get(address_id)
         if not address or not bool(address.is_enabled):
+            return None
+        if (
+            operator_user_id is not None
+            and address.user_id is not None
+            and address.user_id != operator_user_id
+        ):
             return None
 
         payload = await self._normalize_payload(data, partial=True)
@@ -148,7 +157,9 @@ class PublishAddressService:
         await self.session.refresh(address)
         return address
 
-    async def batch_delete(self, address_ids: Sequence[int]) -> int:
+    async def batch_delete(
+        self, address_ids: Sequence[int], operator_user_id: int | None = None
+    ) -> int:
         """批量软删除随机地址。"""
         normalized_ids: List[int] = []
         for raw_address_id in address_ids:
@@ -167,16 +178,30 @@ class PublishAddressService:
             PublishAddress.is_enabled.is_(True),
         )
         addresses = (await self.session.execute(stmt)).scalars().all()
+        if operator_user_id is not None:
+            addresses = [
+                address
+                for address in addresses
+                if address.user_id is None or address.user_id == operator_user_id
+            ]
         for address in addresses:
             address.is_enabled = False
 
         await self.session.commit()
         return len(addresses)
 
-    async def update_status(self, address_id: int, is_enabled: bool) -> PublishAddress | None:
+    async def update_status(
+        self, address_id: int, is_enabled: bool, operator_user_id: int | None = None
+    ) -> PublishAddress | None:
         """更新随机地址启用状态。"""
         address = await self.get(address_id)
         if not address:
+            return None
+        if (
+            operator_user_id is not None
+            and address.user_id is not None
+            and address.user_id != operator_user_id
+        ):
             return None
         address.is_enabled = bool(is_enabled)
         await self.session.commit()
@@ -191,12 +216,22 @@ class PublishAddressService:
         result = await self.session.execute(stmt)
         return [str(account_id) for account_id in result.scalars().all() if account_id]
 
-    async def _list_enabled_addresses(self, account_id: str | None) -> List[PublishAddress]:
+    async def _list_enabled_addresses(
+        self, account_id: str | None, owner_id: int | None = None
+    ) -> List[PublishAddress]:
+        # 全局地址池：仅本人地址 + 未归属的历史全局地址，不混入其他用户的地址
         stmt = (
             select(PublishAddress)
             .where(PublishAddress.is_enabled.is_(True))
             .order_by(desc(PublishAddress.updated_at), desc(PublishAddress.id))
         )
+        if owner_id is not None:
+            stmt = stmt.where(
+                or_(
+                    PublishAddress.user_id == owner_id,
+                    PublishAddress.user_id.is_(None),
+                )
+            )
         return (await self.session.execute(stmt)).scalars().all()
 
     async def _get_account_owner_id(self, account_id: str) -> int | None:
@@ -219,7 +254,9 @@ class PublishAddressService:
                     address_source="personal_pool",
                 )
 
-        global_addresses = await self._list_enabled_addresses(account_id=None)
+        global_addresses = await self._list_enabled_addresses(
+            account_id=None, owner_id=owner_id
+        )
         return PublishAddressQueueState(
             addresses=global_addresses,
             address_source="global_pool",
@@ -313,6 +350,14 @@ class PublishAddressService:
     ) -> List[Any]:
         normalized_is_enabled = True if is_enabled is None else bool(is_enabled)
         conditions: List[Any] = [PublishAddress.is_enabled.is_(normalized_is_enabled)]
+        if owner_id is not None:
+            # 本人地址 + 未归属的历史全局地址；其他用户的地址不可见
+            conditions.append(
+                or_(
+                    PublishAddress.user_id == owner_id,
+                    PublishAddress.user_id.is_(None),
+                )
+            )
         normalized_keyword = self._normalize_optional_text(keyword)
         if normalized_keyword:
             keyword_like = f"%{normalized_keyword}%"

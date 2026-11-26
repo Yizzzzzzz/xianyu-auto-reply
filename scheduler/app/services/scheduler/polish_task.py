@@ -19,6 +19,7 @@ import aiohttp
 from loguru import logger
 from sqlalchemy import delete as sql_delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from common.utils.auth_scope import get_account_owner_id
 
 from common.db.session import async_session_maker
 from common.models.xy_account import XYAccount
@@ -474,6 +475,7 @@ class PolishTaskService:
             log = ScheduledPolishLog(
                 batch_id=batch_id,
                 account_id=account_id,
+                user_id=await get_account_owner_id(session, account_id),
                 item_id=item_id,
                 status="success" if success else "failed",
                 error_message=error_message[:500] if error_message else None,

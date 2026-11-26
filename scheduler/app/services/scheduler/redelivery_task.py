@@ -19,6 +19,7 @@ from typing import Dict, List, Optional
 from loguru import logger
 from sqlalchemy import delete as sql_delete, or_, select, update as sql_update
 from sqlalchemy.ext.asyncio import AsyncSession
+from common.utils.auth_scope import get_account_owner_id
 
 from common.db.session import async_session_maker
 from common.models.scheduled_redelivery_log import ScheduledRedeliveryLog
@@ -892,6 +893,7 @@ class RedeliveryTask:
             log = ScheduledRedeliveryLog(
                 batch_id=batch_id,
                 account_id=account_id,
+                user_id=await get_account_owner_id(session, account_id),
                 order_no=order_no,
                 status="success" if success else "failed",
                 error_message=error_message[:500] if error_message else None,

@@ -22,6 +22,7 @@ class ScheduledPolishLog(TimestampMixin, Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True, comment="主键ID")
     batch_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True, comment="批次ID，标识一次定时任务执行")
     account_id: Mapped[str] = mapped_column(String(80), nullable=False, index=True, comment="账号ID")
+    user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True, comment="归属平台用户ID（xy_users.id），空表示未归属的历史数据")
     item_id: Mapped[str] = mapped_column(String(64), nullable=False, comment="商品ID")
     status: Mapped[str] = mapped_column(String(20), nullable=False, comment="状态：success/failed")
     error_message: Mapped[str | None] = mapped_column(String(500), comment="错误信息")

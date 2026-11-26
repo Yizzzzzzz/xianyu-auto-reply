@@ -7,7 +7,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text, func
+from sqlalchemy import BigInteger, Boolean, DateTime, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from common.db.base_class import Base
@@ -20,6 +20,7 @@ class ConfirmReceiptMessage(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True, comment="主键ID")
     account_id: Mapped[str] = mapped_column(String(80), nullable=False, unique=True, index=True, comment="账号ID")  # 账号ID，一个账号只有一条配置
+    user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True, comment="归属平台用户ID（xy_users.id），空表示未归属的历史数据")
     enabled: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否启用")  # 是否启用
     message_content: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="消息文本内容")  # 消息文本内容
     message_image: Mapped[Optional[str]] = mapped_column(String(512), nullable=True, comment="消息图片URL")  # 消息图片URL

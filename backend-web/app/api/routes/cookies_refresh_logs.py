@@ -8,7 +8,7 @@ COOKIES刷新日志路由模块
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api import deps
@@ -25,7 +25,7 @@ async def list_cookies_refresh_batches(
     end_date: str | None = Query(default=None, description="结束日期，格式：YYYY-MM-DD"),
     page: int = Query(default=1, ge=1, description="页码"),
     page_size: int = Query(default=20, ge=1, le=100, description="每页数量"),
-    _: User = Depends(deps.get_current_admin_user),
+    current_user: User = Depends(deps.get_current_admin_user),
     session: AsyncSession = Depends(deps.get_db_session),
 ) -> dict:
     """获取COOKIES刷新执行批次列表。"""
@@ -39,6 +39,12 @@ async def list_cookies_refresh_batches(
         func.sum(case((ScheduledCookiesRefreshLog.status == "success", 1), else_=0)).label("success_count"),
         func.sum(case((ScheduledCookiesRefreshLog.status == "failed", 1), else_=0)).label("failed_count"),
     ).group_by(ScheduledCookiesRefreshLog.batch_id)
+    base_query = base_query.where(
+        or_(
+            ScheduledCookiesRefreshLog.user_id == current_user.id,
+            ScheduledCookiesRefreshLog.user_id.is_(None),
+        )
+    )
 
     if start_date:
         try:
@@ -100,7 +106,7 @@ async def list_cookies_refresh_batches(
 @router.get("/cookies-refresh-batches/{batch_id}")
 async def get_cookies_refresh_batch_detail(
     batch_id: str,
-    _: User = Depends(deps.get_current_admin_user),
+    current_user: User = Depends(deps.get_current_admin_user),
     session: AsyncSession = Depends(deps.get_db_session),
 ) -> dict:
     """获取COOKIES刷新批次详情。"""
@@ -110,7 +116,13 @@ async def get_cookies_refresh_batch_detail(
         func.sum(case((ScheduledCookiesRefreshLog.status == "initialized", 1), else_=0)).label("initialized_count"),
         func.sum(case((ScheduledCookiesRefreshLog.status == "success", 1), else_=0)).label("success_count"),
         func.sum(case((ScheduledCookiesRefreshLog.status == "failed", 1), else_=0)).label("failed_count"),
-    ).where(ScheduledCookiesRefreshLog.batch_id == batch_id)
+    ).where(
+        ScheduledCookiesRefreshLog.batch_id == batch_id,
+        or_(
+            ScheduledCookiesRefreshLog.user_id == current_user.id,
+            ScheduledCookiesRefreshLog.user_id.is_(None),
+        ),
+    )
     summary = (await session.execute(summary_stmt)).first()
 
     if not summary or summary.total_accounts == 0:
@@ -121,7 +133,11 @@ async def get_cookies_refresh_batch_detail(
         }
 
     logs_stmt = select(ScheduledCookiesRefreshLog).where(
-        ScheduledCookiesRefreshLog.batch_id == batch_id
+        ScheduledCookiesRefreshLog.batch_id == batch_id,
+        or_(
+            ScheduledCookiesRefreshLog.user_id == current_user.id,
+            ScheduledCookiesRefreshLog.user_id.is_(None),
+        ),
     ).order_by(ScheduledCookiesRefreshLog.created_at.asc())
     logs = (await session.execute(logs_stmt)).scalars().all()
 

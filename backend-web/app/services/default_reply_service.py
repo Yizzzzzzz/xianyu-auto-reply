@@ -7,6 +7,7 @@ from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from common.models.default_reply import DefaultReply, DefaultReplyRecord
+from common.utils.auth_scope import user_scope_condition
 
 
 class DefaultReplyService:
@@ -15,12 +16,16 @@ class DefaultReplyService:
     def __init__(self, session: AsyncSession):
         self.session = session
 
-    async def get_default_reply(self, account_id: str) -> Optional[Dict[str, Any]]:
+    async def get_default_reply(
+        self, account_id: str, owner_id: int | None = None
+    ) -> Optional[Dict[str, Any]]:
         """获取账号的默认回复设置（账号级别，item_id为空）"""
         stmt = select(DefaultReply).where(
             DefaultReply.account_id == account_id,
             DefaultReply.item_id.is_(None)  # 账号级别默认回复，item_id为空
         )
+        if owner_id is not None:
+            stmt = stmt.where(user_scope_condition(DefaultReply, owner_id))
         result = await self.session.execute(stmt)
         reply = result.scalars().first()
         if not reply:
@@ -55,8 +60,11 @@ class DefaultReplyService:
         location_latitude: str = "",
         location_title: str = "",
         location_subtitle: str = "",
+        owner_id: int | None = None,
     ) -> bool:
         """保存默认回复设置（账号级别，item_id为空）"""
+        # 保存按账号查找（不加 user 过滤，避免同一账号出现重复行）；
+        # 路由层已校验账号归属，写时把 user_id 认领为当前账号归属人。
         stmt = select(DefaultReply).where(
             DefaultReply.account_id == account_id,
             DefaultReply.item_id.is_(None)  # 账号级别默认回复，item_id为空
@@ -65,6 +73,8 @@ class DefaultReplyService:
         reply = result.scalars().first()
 
         if reply:
+            if owner_id is not None and reply.user_id != owner_id:
+                reply.user_id = owner_id
             reply.enabled = enabled
             reply.reply_type = reply_type
             reply.reply_content = reply_content
@@ -80,6 +90,7 @@ class DefaultReplyService:
         else:
             reply = DefaultReply(
                 account_id=account_id,
+                user_id=owner_id,
                 item_id=None,  # 账号级别默认回复
                 enabled=enabled,
                 reply_type=reply_type,
@@ -99,22 +110,30 @@ class DefaultReplyService:
         await self.session.commit()
         return True
 
-    async def delete_default_reply(self, account_id: str) -> bool:
+    async def delete_default_reply(
+        self, account_id: str, owner_id: int | None = None
+    ) -> bool:
         """删除默认回复设置（账号级别，item_id为空）"""
         stmt = delete(DefaultReply).where(
             DefaultReply.account_id == account_id,
             DefaultReply.item_id.is_(None)  # 账号级别默认回复，item_id为空
         )
+        if owner_id is not None:
+            stmt = stmt.where(user_scope_condition(DefaultReply, owner_id))
         result = await self.session.execute(stmt)
         await self.session.commit()
         return result.rowcount > 0
 
-    async def get_all_default_replies(self, account_ids: list[str]) -> Dict[str, Dict[str, Any]]:
+    async def get_all_default_replies(
+        self, account_ids: list[str], owner_id: int | None = None
+    ) -> Dict[str, Dict[str, Any]]:
         """获取多个账号的默认回复设置（账号级别，item_id为空）"""
         stmt = select(DefaultReply).where(
             DefaultReply.account_id.in_(account_ids),
             DefaultReply.item_id.is_(None)  # 账号级别默认回复，item_id为空
         )
+        if owner_id is not None:
+            stmt = stmt.where(user_scope_condition(DefaultReply, owner_id))
         result = await self.session.execute(stmt)
         replies = result.scalars().all()
         
@@ -164,15 +183,19 @@ class DefaultReplyService:
 
     # ==================== 商品级别默认回复 ====================
 
-    async def get_item_default_reply(self, account_id: str, item_id: str) -> Optional[Dict[str, Any]]:
+    async def get_item_default_reply(
+        self, account_id: str, item_id: str, owner_id: int | None = None
+    ) -> Optional[Dict[str, Any]]:
         """获取商品级别的默认回复设置"""
         if not item_id:
             return None
-        
+
         stmt = select(DefaultReply).where(
             DefaultReply.account_id == account_id,
             DefaultReply.item_id == item_id
         )
+        if owner_id is not None:
+            stmt = stmt.where(user_scope_condition(DefaultReply, owner_id))
         result = await self.session.execute(stmt)
         reply = result.scalars().first()
         if not reply:
@@ -209,8 +232,10 @@ class DefaultReplyService:
         location_latitude: str = "",
         location_title: str = "",
         location_subtitle: str = "",
+        owner_id: int | None = None,
     ) -> bool:
         """保存商品级别的默认回复设置"""
+        # 保存按账号+商品查找（不加 user 过滤，避免重复行）；写时认领归属。
         stmt = select(DefaultReply).where(
             DefaultReply.account_id == account_id,
             DefaultReply.item_id == item_id
@@ -219,6 +244,8 @@ class DefaultReplyService:
         reply = result.scalars().first()
 
         if reply:
+            if owner_id is not None and reply.user_id != owner_id:
+                reply.user_id = owner_id
             reply.enabled = enabled
             reply.reply_type = reply_type
             reply.reply_content = reply_content
@@ -234,6 +261,7 @@ class DefaultReplyService:
         else:
             reply = DefaultReply(
                 account_id=account_id,
+                user_id=owner_id,
                 item_id=item_id,
                 enabled=enabled,
                 reply_type=reply_type,
@@ -253,12 +281,16 @@ class DefaultReplyService:
         await self.session.commit()
         return True
 
-    async def delete_item_default_reply(self, account_id: str, item_id: str) -> bool:
+    async def delete_item_default_reply(
+        self, account_id: str, item_id: str, owner_id: int | None = None
+    ) -> bool:
         """删除商品级别的默认回复设置"""
         stmt = delete(DefaultReply).where(
             DefaultReply.account_id == account_id,
             DefaultReply.item_id == item_id
         )
+        if owner_id is not None:
+            stmt = stmt.where(user_scope_condition(DefaultReply, owner_id))
         result = await self.session.execute(stmt)
         await self.session.commit()
         return result.rowcount > 0

@@ -18,6 +18,7 @@ from typing import Optional
 from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from common.utils.auth_scope import get_account_owner_id
 
 from common.db.session import async_session_maker
 from common.models.scheduled_close_notice_log import ScheduledCloseNoticeLog
@@ -132,6 +133,7 @@ class CloseNoticeTaskService:
             log = ScheduledCloseNoticeLog(
                 batch_id=batch_id,
                 account_id=account_id,
+                user_id=await get_account_owner_id(session, account_id),
                 status=status,
                 error_message=error_message[:500] if error_message else None,
             )

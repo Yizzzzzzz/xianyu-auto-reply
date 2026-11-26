@@ -20,6 +20,7 @@ class AutoRateConfig(TimestampMixin, Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True, comment="主键ID")
     account_id: Mapped[str] = mapped_column(String(80), nullable=False, unique=True, comment="账号ID")
+    user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True, comment="归属平台用户ID（xy_users.id），空表示未归属的历史数据")
     enabled: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否启用自动评价")
     rate_type: Mapped[str] = mapped_column(String(20), default="text", comment="评价类型: text-固定文字, api-API获取")
     text_content: Mapped[str | None] = mapped_column(Text, comment="固定评价文字内容")

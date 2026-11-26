@@ -38,7 +38,7 @@ async def list_token_renewal_batches(
     end_date: str | None = Query(default=None, description="结束日期，格式：YYYY-MM-DD"),
     page: str = Query(default="1", description="页码"),
     page_size: str = Query(default="20", description="每页数量"),
-    _: User = Depends(deps.get_current_admin_user),
+    current_user: User = Depends(deps.get_current_admin_user),
     session: AsyncSession = Depends(deps.get_db_session),
 ) -> dict:
     """获取 Token 续期执行批次列表。"""
@@ -74,6 +74,7 @@ async def list_token_renewal_batches(
         end_date=end_date,
         page=page_number,
         page_size=page_size_number,
+        owner_id=current_user.id,
     )
     return {
         "success": True,
@@ -94,12 +95,12 @@ async def list_token_renewal_batches(
 @router.get("/token-renewal-batches/{batch_id}")
 async def get_token_renewal_batch_detail(
     batch_id: str,
-    _: User = Depends(deps.get_current_admin_user),
+    current_user: User = Depends(deps.get_current_admin_user),
     session: AsyncSession = Depends(deps.get_db_session),
 ) -> dict:
     """获取指定 Token 续期批次的逐账号明细。"""
     detail = await ScheduledBatchLogService(session).get_token_renewal_batch_detail(
-        batch_id
+        batch_id, owner_id=current_user.id
     )
     if detail is None:
         return {

@@ -54,6 +54,7 @@ from common.services.token_request_lock import (
     token_request_lock,
 )
 from common.utils.time_utils import get_beijing_now_naive
+from common.utils.auth_scope import get_account_owner_id
 
 TOKEN_RENEWAL_MAX_CONCURRENCY = 5
 
@@ -149,11 +150,20 @@ class TokenRenewalTask:
         """将一轮 Token 续期结果按批次写入数据库。"""
         async with async_session_maker() as session:
             try:
+                # 按账号查归属用户，写日志时带上 user_id；账号已删则保持为空
+                owner_ids: dict[str, int | None] = {}
+                for result in results:
+                    _account_id = result.candidate.account_id
+                    if _account_id not in owner_ids:
+                        owner_ids[_account_id] = await get_account_owner_id(
+                            session, _account_id
+                        )
                 session.add_all(
                     [
                         ScheduledTokenRenewalLog(
                             batch_id=batch_id,
                             account_id=result.candidate.account_id,
+                            user_id=owner_ids[result.candidate.account_id],
                             token_user_id=result.candidate.user_id,
                             status="success" if result.success else "failed",
                             renew_expire_at=result.renew_expire_at,

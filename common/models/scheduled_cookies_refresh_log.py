@@ -24,6 +24,7 @@ class ScheduledCookiesRefreshLog(TimestampMixin, Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True, comment="主键ID")
     batch_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True, comment="批次ID")
     account_id: Mapped[str] = mapped_column(String(80), nullable=False, index=True, comment="账号ID")
+    user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True, comment="归属平台用户ID（xy_users.id），空表示未归属的历史数据")
     status: Mapped[str] = mapped_column(String(20), nullable=False, comment="状态：initialized/success/failed")
     updated_cookie_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="本次增量更新的Cookie字段数量")
     next_expire_at: Mapped[datetime | None] = mapped_column(DateTime, comment="下次到期时间")

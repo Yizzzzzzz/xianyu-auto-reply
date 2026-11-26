@@ -550,6 +550,8 @@ class AccountImportService:
             existing = result.scalars().first()
 
             if existing:
+                if existing.user_id != self.owner_id:
+                    existing.user_id = self.owner_id
                 existing.enabled = _parse_bool(row.get("启用"))
                 existing.reply_content = _parse_str(row.get("回复内容")) or existing.reply_content
                 existing.reply_image = _parse_str(row.get("回复图片")) or existing.reply_image
@@ -567,6 +569,7 @@ class AccountImportService:
             else:
                 reply = DefaultReply(
                     account_id=account_id,
+                    user_id=self.owner_id,
                     item_id=item_id,
                     enabled=_parse_bool(row.get("启用")),
                     reply_content=_parse_str(row.get("回复内容")) or None,
@@ -609,12 +612,13 @@ class AccountImportService:
 
             enabled = _parse_bool(row.get("启用"))
             insert_sql = text("""
-                INSERT INTO xy_message_filters (account_id, keyword, filter_type, enabled)
-                VALUES (:account_id, :keyword, :filter_type, :enabled)
+                INSERT INTO xy_message_filters (account_id, keyword, filter_type, enabled, user_id)
+                VALUES (:account_id, :keyword, :filter_type, :enabled, :user_id)
             """)
             await self.session.execute(insert_sql, {
                 "account_id": account_id, "keyword": keyword,
                 "filter_type": filter_type, "enabled": 1 if enabled else 0,
+                "user_id": self.owner_id,
             })
 
         await self.session.commit()
@@ -632,12 +636,15 @@ class AccountImportService:
             existing = result.scalars().first()
 
             if existing:
+                if existing.user_id != self.owner_id:
+                    existing.user_id = self.owner_id
                 existing.enabled = _parse_bool(row.get("启用"))
                 existing.message_content = _parse_str(row.get("消息内容")) or existing.message_content
                 existing.message_image = _parse_str(row.get("消息图片")) or existing.message_image
             else:
                 msg = ConfirmReceiptMessage(
                     account_id=account_id,
+                    user_id=self.owner_id,
                     enabled=_parse_bool(row.get("启用")),
                     message_content=_parse_str(row.get("消息内容")) or None,
                     message_image=_parse_str(row.get("消息图片")) or None,
@@ -659,6 +666,8 @@ class AccountImportService:
             existing = result.scalars().first()
 
             if existing:
+                if existing.user_id != self.owner_id:
+                    existing.user_id = self.owner_id
                 existing.enabled = _parse_bool(row.get("启用"))
                 existing.rate_type = _parse_str(row.get("评价类型")) or existing.rate_type
                 existing.text_content = _parse_str(row.get("评价内容")) or existing.text_content
@@ -666,6 +675,7 @@ class AccountImportService:
             else:
                 cfg = AutoRateConfig(
                     account_id=account_id,
+                    user_id=self.owner_id,
                     enabled=_parse_bool(row.get("启用")),
                     rate_type=_parse_str(row.get("评价类型")) or "text",
                     text_content=_parse_str(row.get("评价内容")) or None,

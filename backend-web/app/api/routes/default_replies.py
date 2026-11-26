@@ -59,7 +59,7 @@ async def get_default_reply(
     if not account:
         raise HTTPException(status_code=404, detail="账号不存在")
     
-    result = await reply_service.get_default_reply(account_id)
+    result = await reply_service.get_default_reply(account_id, owner_id=owner_id)
     if result is None:
         return {
             "enabled": False,
@@ -141,6 +141,7 @@ async def update_default_reply(
         location_latitude=reply_data.location_latitude,
         location_title=reply_data.location_title,
         location_subtitle=reply_data.location_subtitle,
+        owner_id=owner_id,
     )
     return {
         "success": True,
@@ -190,7 +191,7 @@ async def get_all_default_replies(
     owner_id, _ = resolve_account_owner_scope(current_user)
     account_ids = await account_service.list_account_ids(owner_id)
     
-    return await reply_service.get_all_default_replies(account_ids)
+    return await reply_service.get_all_default_replies(account_ids, owner_id=owner_id)
 
 
 @router.delete("/{account_id}")
@@ -207,7 +208,7 @@ async def delete_default_reply(
     if not account:
         raise HTTPException(status_code=404, detail="账号不存在")
     
-    success = await reply_service.delete_default_reply(account_id)
+    success = await reply_service.delete_default_reply(account_id, owner_id=owner_id)
     if success:
         return {"message": "默认回复删除成功"}
     raise HTTPException(status_code=400, detail="删除失败")

@@ -762,6 +762,11 @@ class AccountService:
         existing_rule = result.scalars().first()
 
         if existing_rule:
+            if (
+                account.owner_id is not None
+                and existing_rule.user_id != account.owner_id
+            ):
+                existing_rule.user_id = account.owner_id
             existing_rule.enabled = delivery_disabled
             existing_rule.block_reason = normalized_reason
             existing_rule.auto_close_order = normalized_auto_close
@@ -770,6 +775,7 @@ class AccountService:
         else:
             new_rule = XYDeliveryBlockRule(
                 account_id=account.account_id,
+                user_id=account.owner_id,
                 rule_code="buyer_credit_zero",
                 enabled=delivery_disabled,
                 priority=10,
@@ -789,7 +795,9 @@ class AccountService:
         account.delivery_only_card_after_close = normalized_only_card
         account.delivery_disabled_excluded_items = normalized_excluded_for_db
 
-    async def get_delivery_block_rules(self, account_id: str) -> list[dict]:
+    async def get_delivery_block_rules(
+        self, account_id: str, owner_id: int | None = None
+    ) -> list[dict]:
         """获取账号的禁止发货规则列表
 
         返回该账号所有规则配置（包括未启用的），按 priority 排序。
@@ -803,6 +811,7 @@ class AccountService:
         """
         from common.models.xy_delivery_block_rule import XYDeliveryBlockRule
         from common.services.delivery_block_rule_meta import get_all_rule_metadata
+        from common.utils.auth_scope import user_scope_condition
 
         # 查询已有规则
         stmt = (
@@ -810,6 +819,8 @@ class AccountService:
             .where(XYDeliveryBlockRule.account_id == account_id)
             .order_by(XYDeliveryBlockRule.priority.asc())
         )
+        if owner_id is not None:
+            stmt = stmt.where(user_scope_condition(XYDeliveryBlockRule, owner_id))
         result = await self.session.execute(stmt)
         existing_rules = result.scalars().all()
 
@@ -883,6 +894,7 @@ class AccountService:
         self,
         account_id: str,
         rules: list,
+        owner_id: int | None = None,
     ) -> None:
         """批量更新账号的禁止发货规则配置
 
@@ -893,6 +905,7 @@ class AccountService:
             rules: 规则配置列表（DeliveryBlockRuleItem 实例列表）
         """
         from common.models.xy_delivery_block_rule import XYDeliveryBlockRule
+        from common.utils.auth_scope import user_scope_condition
         from sqlalchemy import and_
 
         for rule_item in rules:
@@ -922,7 +935,8 @@ class AccountService:
             # 规则参数
             config = rule_item.config if rule_item.config else None
 
-            # 查询是否已存在
+            # 查询是否已存在（按账号+规则查找，不加 user 过滤，避免违反唯一约束；
+            # 路由层已校验账号归属，写时把 user_id 认领为当前账号归属人）
             stmt = select(XYDeliveryBlockRule).where(
                 and_(
                     XYDeliveryBlockRule.account_id == account_id,
@@ -934,6 +948,8 @@ class AccountService:
 
             if existing:
                 # 更新
+                if owner_id is not None and existing.user_id != owner_id:
+                    existing.user_id = owner_id
                 existing.enabled = enabled
                 existing.priority = priority
                 existing.block_reason = block_reason
@@ -945,6 +961,7 @@ class AccountService:
                 # 插入
                 new_rule = XYDeliveryBlockRule(
                     account_id=account_id,
+                    user_id=owner_id,
                     rule_code=rule_code,
                     enabled=enabled,
                     priority=priority,

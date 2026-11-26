@@ -27,6 +27,7 @@ class ScheduledApiCookieRenewLog(TimestampMixin, Base):
     account_id: Mapped[str] = mapped_column(
         String(80), nullable=False, index=True, comment="账号ID"
     )
+    user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True, comment="归属平台用户ID（xy_users.id），空表示未归属的历史数据")
     status: Mapped[str] = mapped_column(
         String(30), nullable=False, comment="状态：success/cookie_updated/browser_renewed/need_password_login/failed"
     )

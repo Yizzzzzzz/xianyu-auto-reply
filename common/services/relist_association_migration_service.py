@@ -245,6 +245,7 @@ class RelistAssociationMigrationService:
                 self.session.add(
                     DefaultReply(
                         account_id=account_id,
+                        user_id=row.user_id,
                         item_id=new_item_id,
                         enabled=row.enabled,
                         reply_type=row.reply_type,

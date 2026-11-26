@@ -70,4 +70,34 @@ __all__ = [
     "is_admin_user",
     "resolve_owner_scope",
     "resolve_account_owner_scope",
+    "user_scope_condition",
+    "get_account_owner_id",
 ]
+
+
+def user_scope_condition(model, owner_id: int):
+    """当前用户在“账号归属表”上的可见范围条件。
+
+    本人归属的数据（user_id == owner_id）+ 无法归属的历史数据
+    （user_id 为空，如账号已被删除、或全局共用的地址池旧数据）。
+    空值行保持对所有人可见，避免历史数据因无法归属而突然消失；
+    新写入的行必须带上当前用户 id，之后即按归属隔离。
+    """
+    from sqlalchemy import or_
+
+    return or_(model.user_id == owner_id, model.user_id.is_(None))
+
+
+async def get_account_owner_id(session, account_id: str) -> int | None:
+    """按闲鱼号查归属平台用户 id（定时任务等系统侧写日志时用）。
+
+    账号不存在（已被删除）时返回 None，调用方保持 user_id 为空。
+    """
+    from sqlalchemy import select
+
+    from common.models.xy_account import XYAccount
+
+    result = await session.execute(
+        select(XYAccount.owner_id).where(XYAccount.account_id == account_id).limit(1)
+    )
+    return result.scalar_one_or_none()

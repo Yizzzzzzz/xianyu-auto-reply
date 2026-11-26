@@ -39,6 +39,7 @@ from app.services.recharge_service import RechargeService
 from common.services.settlement_service import BALANCE_KEY
 
 from common.utils.time_utils import get_beijing_now_naive, safe_isoformat
+from common.utils.auth_scope import user_scope_condition
 router = APIRouter(tags=["admin"])
 settings = get_settings()
 
@@ -646,7 +647,7 @@ async def list_redelivery_batches(
     end_date: str | None = Query(default=None, description="结束日期，格式：YYYY-MM-DD"),
     page: int = Query(default=1, ge=1, description="页码"),
     page_size: int = Query(default=20, ge=1, le=100, description="每页数量"),
-    _: User = Depends(deps.get_current_admin_user),
+    current_user: User = Depends(deps.get_current_admin_user),
     session: AsyncSession = Depends(deps.get_db_session),
 ) -> dict:
     """获取定时补发货执行批次列表（管理员专用）"""
@@ -656,6 +657,7 @@ async def list_redelivery_batches(
         end_date=end_date,
         page=page,
         page_size=page_size,
+        owner_id=current_user.id,
     )
 
     return {
@@ -671,12 +673,12 @@ async def list_redelivery_batches(
 @router.get("/redelivery-batches/{batch_id}")
 async def get_redelivery_batch_detail(
     batch_id: str,
-    _: User = Depends(deps.get_current_admin_user),
+    current_user: User = Depends(deps.get_current_admin_user),
     session: AsyncSession = Depends(deps.get_db_session),
 ) -> dict:
     """获取定时补发货执行批次详情（管理员专用）"""
     service = ScheduledBatchLogService(session)
-    data = await service.get_redelivery_batch_detail(batch_id)
+    data = await service.get_redelivery_batch_detail(batch_id, owner_id=current_user.id)
     if data is None:
         return {"success": False, "message": "批次不存在", "data": None}
 
@@ -694,7 +696,7 @@ async def list_rate_batches(
     end_date: str | None = Query(default=None, description="结束日期，格式：YYYY-MM-DD"),
     page: int = Query(default=1, ge=1, description="页码"),
     page_size: int = Query(default=20, ge=1, le=100, description="每页数量"),
-    _: User = Depends(deps.get_current_admin_user),
+    current_user: User = Depends(deps.get_current_admin_user),
     session: AsyncSession = Depends(deps.get_db_session),
 ) -> dict:
     """获取定时补评价执行批次列表（管理员专用）"""
@@ -704,6 +706,7 @@ async def list_rate_batches(
         end_date=end_date,
         page=page,
         page_size=page_size,
+        owner_id=current_user.id,
     )
 
     return {
@@ -719,12 +722,12 @@ async def list_rate_batches(
 @router.get("/rate-batches/{batch_id}")
 async def get_rate_batch_detail(
     batch_id: str,
-    _: User = Depends(deps.get_current_admin_user),
+    current_user: User = Depends(deps.get_current_admin_user),
     session: AsyncSession = Depends(deps.get_db_session),
 ) -> dict:
     """获取定时补评价执行批次详情（管理员专用）"""
     service = ScheduledBatchLogService(session)
-    data = await service.get_rate_batch_detail(batch_id)
+    data = await service.get_rate_batch_detail(batch_id, owner_id=current_user.id)
     if data is None:
         return {"success": False, "message": "批次不存在", "data": None}
 
@@ -937,7 +940,7 @@ async def list_polish_batches(
     end_date: str | None = Query(default=None, description="结束日期，格式：YYYY-MM-DD"),
     page: int = Query(default=1, ge=1, description="页码"),
     page_size: int = Query(default=20, ge=1, le=100, description="每页数量"),
-    _: User = Depends(deps.get_current_admin_user),
+    current_user: User = Depends(deps.get_current_admin_user),
     session: AsyncSession = Depends(deps.get_db_session),
 ) -> dict:
     """获取定时擦亮执行批次列表（管理员专用）"""
@@ -947,6 +950,7 @@ async def list_polish_batches(
         end_date=end_date,
         page=page,
         page_size=page_size,
+        owner_id=current_user.id,
     )
 
     return {
@@ -962,12 +966,12 @@ async def list_polish_batches(
 @router.get("/polish-batches/{batch_id}")
 async def get_polish_batch_detail(
     batch_id: str,
-    _: User = Depends(deps.get_current_admin_user),
+    current_user: User = Depends(deps.get_current_admin_user),
     session: AsyncSession = Depends(deps.get_db_session),
 ) -> dict:
     """获取定时擦亮执行批次详情（管理员专用）"""
     service = ScheduledBatchLogService(session)
-    data = await service.get_polish_batch_detail(batch_id)
+    data = await service.get_polish_batch_detail(batch_id, owner_id=current_user.id)
     if data is None:
         return {"success": False, "message": "批次不存在", "data": None}
 
@@ -981,7 +985,7 @@ async def get_polish_batch_detail(
 
 @router.delete("/redelivery-logs/clear", response_model=ApiResponse)
 async def clear_redelivery_logs(
-    _: User = Depends(deps.get_current_admin_user),
+    current_user: User = Depends(deps.get_current_admin_user),
     session: AsyncSession = Depends(deps.get_db_session),
 ) -> ApiResponse:
     """清空定时补发货日志（只清空10天前的数据）"""
@@ -995,7 +999,8 @@ async def clear_redelivery_logs(
         
         # 删除10天前的日志
         stmt = delete(ScheduledRedeliveryLog).where(
-            ScheduledRedeliveryLog.created_at < ten_days_ago
+            ScheduledRedeliveryLog.created_at < ten_days_ago,
+            user_scope_condition(ScheduledRedeliveryLog, current_user.id),
         )
         
         result = await session.execute(stmt)
@@ -1019,7 +1024,7 @@ async def clear_redelivery_logs(
 
 @router.delete("/rate-logs/clear", response_model=ApiResponse)
 async def clear_rate_logs(
-    _: User = Depends(deps.get_current_admin_user),
+    current_user: User = Depends(deps.get_current_admin_user),
     session: AsyncSession = Depends(deps.get_db_session),
 ) -> ApiResponse:
     """清空定时补评价日志（只清空10天前的数据）"""
@@ -1033,7 +1038,8 @@ async def clear_rate_logs(
         
         # 删除10天前的日志
         stmt = delete(ScheduledRateLog).where(
-            ScheduledRateLog.created_at < ten_days_ago
+            ScheduledRateLog.created_at < ten_days_ago,
+            user_scope_condition(ScheduledRateLog, current_user.id),
         )
         
         result = await session.execute(stmt)
@@ -1057,7 +1063,7 @@ async def clear_rate_logs(
 
 @router.delete("/polish-logs/clear", response_model=ApiResponse)
 async def clear_polish_logs(
-    _: User = Depends(deps.get_current_admin_user),
+    current_user: User = Depends(deps.get_current_admin_user),
     session: AsyncSession = Depends(deps.get_db_session),
 ) -> ApiResponse:
     """清空定时擦亮日志（只清空10天前的数据）"""
@@ -1071,7 +1077,8 @@ async def clear_polish_logs(
         
         # 删除10天前的日志
         stmt = delete(ScheduledPolishLog).where(
-            ScheduledPolishLog.created_at < ten_days_ago
+            ScheduledPolishLog.created_at < ten_days_ago,
+            user_scope_condition(ScheduledPolishLog, current_user.id),
         )
         
         result = await session.execute(stmt)
@@ -1101,7 +1108,7 @@ async def list_red_flower_batches(
     end_date: str | None = Query(default=None, description="结束日期，格式：YYYY-MM-DD"),
     page: int = Query(default=1, ge=1, description="页码"),
     page_size: int = Query(default=20, ge=1, le=100, description="每页数量"),
-    _: User = Depends(deps.get_current_admin_user),
+    current_user: User = Depends(deps.get_current_admin_user),
     session: AsyncSession = Depends(deps.get_db_session),
 ) -> dict:
     """获取求小红花执行批次列表（管理员专用）"""
@@ -1113,6 +1120,7 @@ async def list_red_flower_batches(
         end_date=end_date,
         page=page,
         page_size=page_size,
+        owner_id=current_user.id,
     )
     return {
         "success": True,
@@ -1127,14 +1135,14 @@ async def list_red_flower_batches(
 @router.get("/red-flower-batches/{batch_id}")
 async def get_red_flower_batch_detail(
     batch_id: str,
-    _: User = Depends(deps.get_current_admin_user),
+    current_user: User = Depends(deps.get_current_admin_user),
     session: AsyncSession = Depends(deps.get_db_session),
 ) -> dict:
     """获取求小红花批次详情（管理员专用）"""
     from app.services.scheduled_batch_log_service import ScheduledBatchLogService
 
     service = ScheduledBatchLogService(session)
-    detail = await service.get_red_flower_batch_detail(batch_id)
+    detail = await service.get_red_flower_batch_detail(batch_id, owner_id=current_user.id)
     if not detail:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="批次不存在")
     return {"success": True, "data": detail}
@@ -1142,7 +1150,7 @@ async def get_red_flower_batch_detail(
 
 @router.delete("/red-flower-logs/clear", response_model=ApiResponse)
 async def clear_red_flower_logs(
-    _: User = Depends(deps.get_current_admin_user),
+    current_user: User = Depends(deps.get_current_admin_user),
     session: AsyncSession = Depends(deps.get_db_session),
 ) -> ApiResponse:
     """清空求小红花日志（只清空10天前的数据）"""
@@ -1153,7 +1161,8 @@ async def clear_red_flower_logs(
     try:
         ten_days_ago = get_beijing_now_naive() - timedelta(days=10)
         stmt = delete(ScheduledRedFlowerLog).where(
-            ScheduledRedFlowerLog.created_at < ten_days_ago
+            ScheduledRedFlowerLog.created_at < ten_days_ago,
+            user_scope_condition(ScheduledRedFlowerLog, current_user.id),
         )
         result = await session.execute(stmt)
         await session.commit()
@@ -1182,7 +1191,7 @@ async def list_login_renew_batches(
     end_date: str | None = Query(default=None, description="结束日期，格式：YYYY-MM-DD"),
     page: int = Query(default=1, ge=1, description="页码"),
     page_size: int = Query(default=20, ge=1, le=100, description="每页数量"),
-    _: User = Depends(deps.get_current_admin_user),
+    current_user: User = Depends(deps.get_current_admin_user),
     session: AsyncSession = Depends(deps.get_db_session),
 ) -> dict:
     """获取登录续期执行批次列表（管理员专用）"""
@@ -1199,6 +1208,9 @@ async def list_login_renew_batches(
         func.sum(case((ScheduledLoginRenewLog.status == "session_expired", 1), else_=0)).label("session_expired_count"),
         func.sum(case((ScheduledLoginRenewLog.status == "failed", 1), else_=0)).label("failed_count"),
     ).group_by(ScheduledLoginRenewLog.batch_id)
+    base_query = base_query.where(
+        user_scope_condition(ScheduledLoginRenewLog, current_user.id)
+    )
     
     # 时间范围筛选
     if start_date:
@@ -1253,7 +1265,7 @@ async def list_login_renew_batches(
 @router.get("/login-renew-batches/{batch_id}")
 async def get_login_renew_batch_detail(
     batch_id: str,
-    _: User = Depends(deps.get_current_admin_user),
+    current_user: User = Depends(deps.get_current_admin_user),
     session: AsyncSession = Depends(deps.get_db_session),
 ) -> dict:
     """获取登录续期执行批次详情（管理员专用）"""
@@ -1267,7 +1279,10 @@ async def get_login_renew_batch_detail(
         func.sum(case((ScheduledLoginRenewLog.status == "token_refreshed", 1), else_=0)).label("token_refreshed_count"),
         func.sum(case((ScheduledLoginRenewLog.status == "session_expired", 1), else_=0)).label("session_expired_count"),
         func.sum(case((ScheduledLoginRenewLog.status == "failed", 1), else_=0)).label("failed_count"),
-    ).where(ScheduledLoginRenewLog.batch_id == batch_id)
+    ).where(
+        ScheduledLoginRenewLog.batch_id == batch_id,
+        user_scope_condition(ScheduledLoginRenewLog, current_user.id),
+    )
     
     summary_result = await session.execute(summary_stmt)
     summary = summary_result.first()
@@ -1278,7 +1293,8 @@ async def get_login_renew_batch_detail(
     
     # 查询批次所有日志
     logs_stmt = select(ScheduledLoginRenewLog).where(
-        ScheduledLoginRenewLog.batch_id == batch_id
+        ScheduledLoginRenewLog.batch_id == batch_id,
+        user_scope_condition(ScheduledLoginRenewLog, current_user.id),
     ).order_by(ScheduledLoginRenewLog.created_at)
     
     logs_result = await session.execute(logs_stmt)
@@ -1312,7 +1328,7 @@ async def get_login_renew_batch_detail(
 
 @router.delete("/login-renew-logs/clear", response_model=ApiResponse)
 async def clear_login_renew_logs(
-    _: User = Depends(deps.get_current_admin_user),
+    current_user: User = Depends(deps.get_current_admin_user),
     session: AsyncSession = Depends(deps.get_db_session),
 ) -> ApiResponse:
     """清空登录续期日志（只清空10天前的数据）"""
@@ -1326,7 +1342,8 @@ async def clear_login_renew_logs(
         
         # 删除10天前的日志
         stmt = delete(ScheduledLoginRenewLog).where(
-            ScheduledLoginRenewLog.created_at < ten_days_ago
+            ScheduledLoginRenewLog.created_at < ten_days_ago,
+            user_scope_condition(ScheduledLoginRenewLog, current_user.id),
         )
         
         result = await session.execute(stmt)
@@ -1356,7 +1373,7 @@ async def list_close_notice_batches(
     end_date: str | None = Query(default=None, description="结束日期，格式：YYYY-MM-DD"),
     page: int = Query(default=1, ge=1, description="页码"),
     page_size: int = Query(default=20, ge=1, le=100, description="每页数量"),
-    _: User = Depends(deps.get_current_admin_user),
+    current_user: User = Depends(deps.get_current_admin_user),
     session: AsyncSession = Depends(deps.get_db_session),
 ):
     """获取账号消息通知关闭日志批次列表"""
@@ -1370,6 +1387,9 @@ async def list_close_notice_batches(
         func.sum(case((ScheduledCloseNoticeLog.status == "success", 1), else_=0)).label("success_count"),
         func.sum(case((ScheduledCloseNoticeLog.status == "failed", 1), else_=0)).label("failed_count"),
     ).group_by(ScheduledCloseNoticeLog.batch_id)
+    base_query = base_query.where(
+        user_scope_condition(ScheduledCloseNoticeLog, current_user.id)
+    )
 
     # 时间范围筛选
     if start_date:
@@ -1423,7 +1443,7 @@ async def list_close_notice_batches(
 @router.get("/close-notice-batches/{batch_id}")
 async def get_close_notice_batch_detail(
     batch_id: str,
-    _: User = Depends(deps.get_current_admin_user),
+    current_user: User = Depends(deps.get_current_admin_user),
     session: AsyncSession = Depends(deps.get_db_session),
 ):
     """获取账号消息通知关闭日志批次详情"""
@@ -1435,7 +1455,10 @@ async def get_close_notice_batch_detail(
         func.count().label("total_accounts"),
         func.sum(case((ScheduledCloseNoticeLog.status == "success", 1), else_=0)).label("success_count"),
         func.sum(case((ScheduledCloseNoticeLog.status == "failed", 1), else_=0)).label("failed_count"),
-    ).where(ScheduledCloseNoticeLog.batch_id == batch_id)
+    ).where(
+        ScheduledCloseNoticeLog.batch_id == batch_id,
+        user_scope_condition(ScheduledCloseNoticeLog, current_user.id),
+    )
 
     summary_result = await session.execute(summary_stmt)
     summary = summary_result.first()
@@ -1445,7 +1468,8 @@ async def get_close_notice_batch_detail(
 
     # 查询批次所有日志
     logs_stmt = select(ScheduledCloseNoticeLog).where(
-        ScheduledCloseNoticeLog.batch_id == batch_id
+        ScheduledCloseNoticeLog.batch_id == batch_id,
+        user_scope_condition(ScheduledCloseNoticeLog, current_user.id),
     ).order_by(ScheduledCloseNoticeLog.created_at)
 
     logs_result = await session.execute(logs_stmt)
@@ -1476,7 +1500,7 @@ async def get_close_notice_batch_detail(
 
 @router.delete("/close-notice-logs/clear", response_model=ApiResponse)
 async def clear_close_notice_logs(
-    _: User = Depends(deps.get_current_admin_user),
+    current_user: User = Depends(deps.get_current_admin_user),
     session: AsyncSession = Depends(deps.get_db_session),
 ) -> ApiResponse:
     """清空账号消息通知关闭日志（只清空10天前的数据）"""
@@ -1490,7 +1514,8 @@ async def clear_close_notice_logs(
 
         # 删除10天前的日志
         stmt = delete(ScheduledCloseNoticeLog).where(
-            ScheduledCloseNoticeLog.created_at < ten_days_ago
+            ScheduledCloseNoticeLog.created_at < ten_days_ago,
+            user_scope_condition(ScheduledCloseNoticeLog, current_user.id),
         )
 
         result = await session.execute(stmt)

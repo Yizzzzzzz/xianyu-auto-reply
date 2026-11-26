@@ -20,6 +20,7 @@ from datetime import timedelta
 from loguru import logger
 from sqlalchemy import delete as sql_delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from common.utils.auth_scope import get_account_owner_id
 
 from app.core.config import get_settings
 from app.core.http_client import get_http_client
@@ -372,6 +373,7 @@ class ApiCookieRenewTaskService:
             log_record = ScheduledApiCookieRenewLog(
                 batch_id=batch_id,
                 account_id=account_id,
+                user_id=await get_account_owner_id(session, account_id),
                 status=result.status,
                 updated_cookie_count=len(result.updated_cookie_names),
                 updated_cookie_names=updated_names_str,

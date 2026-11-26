@@ -19,7 +19,7 @@ from common.services.amap_inputtips_service import AmapInputTipsError, AmapInput
 from app.services.publish_address_service import PublishAddressService, _address_to_dict
 from common.models.user import User
 from common.schemas.common import ApiResponse
-from common.utils.auth_scope import resolve_owner_scope
+from common.utils.auth_scope import resolve_account_owner_scope
 
 router = APIRouter(prefix="/product-publish/addresses", tags=["商品发布随机地址池"])
 
@@ -59,7 +59,7 @@ async def list_publish_addresses(
     session: AsyncSession = Depends(get_db_session),
 ) -> Dict[str, Any]:
     """分页查询随机地址池"""
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     svc = PublishAddressService(session)
     data = await svc.list_addresses(
         owner_id=owner_id,
@@ -78,7 +78,7 @@ async def list_publish_address_account_options(
     session: AsyncSession = Depends(get_db_session),
 ) -> Dict[str, Any]:
     """查询随机地址池可选账号列表"""
-    owner_id, _ = resolve_owner_scope(current_user)
+    owner_id, _ = resolve_account_owner_scope(current_user)
     svc = PublishAddressService(session)
     data = await svc.list_account_options(owner_id=owner_id)
     return ApiResponse(success=True, message="查询成功", data={"list": data})
@@ -124,7 +124,9 @@ async def update_publish_address(
     """更新随机地址"""
     svc = PublishAddressService(session)
     try:
-        updated = await svc.update(address_id, req.model_dump(exclude_unset=True))
+        updated = await svc.update(
+            address_id, req.model_dump(exclude_unset=True), operator_user_id=current_user.id
+        )
     except ValueError as exc:
         return ApiResponse(success=False, message=str(exc))
     if not updated:
@@ -141,7 +143,7 @@ async def batch_delete_publish_addresses(
     """批量删除随机地址"""
     svc = PublishAddressService(session)
     try:
-        success_count = await svc.batch_delete(req.ids)
+        success_count = await svc.batch_delete(req.ids, operator_user_id=current_user.id)
     except ValueError as exc:
         return ApiResponse(success=False, message=str(exc))
 
@@ -161,7 +163,9 @@ async def update_publish_address_status(
 ) -> Dict[str, Any]:
     """更新随机地址启停状态"""
     svc = PublishAddressService(session)
-    updated = await svc.update_status(address_id, req.is_enabled)
+    updated = await svc.update_status(
+        address_id, req.is_enabled, operator_user_id=current_user.id
+    )
     if not updated:
         return ApiResponse(success=False, message="随机地址不存在")
     return ApiResponse(

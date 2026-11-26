@@ -178,10 +178,12 @@ async def list_cookie_details(
     if account_ids:
         placeholders = ", ".join([f":acc_{i}" for i in range(len(account_ids))])
         params = {f"acc_{i}": acc_id for i, acc_id in enumerate(account_ids)}
+        params["owner_id"] = owner_id
         sql = text(f"""
-            SELECT account_id, COUNT(*) as count 
-            FROM xy_message_filters 
+            SELECT account_id, COUNT(*) as count
+            FROM xy_message_filters
             WHERE account_id IN ({placeholders})
+              AND (user_id = :owner_id OR user_id IS NULL)
             GROUP BY account_id
         """)
         result = await session.execute(sql, params)
@@ -305,10 +307,12 @@ async def list_cookie_details_paginated(
     if account_ids:
         placeholders = ", ".join([f":acc_{i}" for i in range(len(account_ids))])
         params = {f"acc_{i}": acc_id for i, acc_id in enumerate(account_ids)}
+        params["owner_id"] = owner_id
         sql = text(f"""
-            SELECT account_id, COUNT(*) as count 
-            FROM xy_message_filters 
+            SELECT account_id, COUNT(*) as count
+            FROM xy_message_filters
             WHERE account_id IN ({placeholders})
+              AND (user_id = :owner_id OR user_id IS NULL)
             GROUP BY account_id
         """)
         result = await session.execute(sql, params)
@@ -884,7 +888,9 @@ async def get_delivery_block_rules(
 ) -> ApiResponse:
     """获取账号的禁止发货规则列表"""
     account = await _get_account_or_404(current_user, account_id, account_service)
-    rules = await account_service.get_delivery_block_rules(account.account_id)
+    rules = await account_service.get_delivery_block_rules(
+        account.account_id, owner_id=account.owner_id
+    )
     return ApiResponse(success=True, message="获取成功", data=rules)
 
 
@@ -897,7 +903,9 @@ async def update_delivery_block_rules(
 ) -> ApiResponse:
     """批量更新账号的禁止发货规则配置"""
     account = await _get_account_or_404(current_user, account_id, account_service)
-    await account_service.update_delivery_block_rules(account.account_id, payload.rules)
+    await account_service.update_delivery_block_rules(
+        account.account_id, payload.rules, owner_id=account.owner_id
+    )
     return ApiResponse(success=True, message="禁止发货规则已更新")
 
 

@@ -23,6 +23,7 @@ class CookieRefreshSchedule(TimestampMixin, Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True, comment="主键ID")
     account_id: Mapped[str] = mapped_column(String(80), nullable=False, unique=True, index=True, comment="账号ID")
+    user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True, comment="归属平台用户ID（xy_users.id），空表示未归属的历史数据")
     expire_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, comment="当前Cookie续期到期时间")
     last_refresh_at: Mapped[datetime | None] = mapped_column(DateTime, comment="最近一次续期成功时间")
     last_status: Mapped[str | None] = mapped_column(String(20), comment="最近一次状态：initialized/success/failed")

@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text, func
+from sqlalchemy import BigInteger, Boolean, DateTime, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from common.db.base_class import Base
@@ -17,6 +17,7 @@ class DefaultReply(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True, comment="回复ID")
     account_id: Mapped[str] = mapped_column(String(80), nullable=False, index=True, comment="账号标识")  # 对应 xy_accounts.account_id
+    user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True, comment="归属平台用户ID（xy_users.id），空表示未归属的历史数据")
     item_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True, comment="商品ID(空为账号默认回复)")  # 商品ID，空为账号默认回复
     enabled: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否启用")
     # 回复类型：text-文本回复（可附带图片），api-调用外部API获取回复内容，external_contact-站外联系方式

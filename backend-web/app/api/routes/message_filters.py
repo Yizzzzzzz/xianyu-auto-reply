@@ -84,6 +84,7 @@ async def _create_message_filter_records(
     account_ids: List[str],
     keyword: str,
     filter_types: List[str],
+    owner_id: int,
 ) -> ApiResponse:
     normalized_keyword = keyword.strip()
     if not normalized_keyword:
@@ -113,8 +114,8 @@ async def _create_message_filter_records(
         LIMIT 1
     """)
     insert_sql = text("""
-        INSERT INTO xy_message_filters (account_id, keyword, filter_type, enabled)
-        VALUES (:account_id, :keyword, :filter_type, 1)
+        INSERT INTO xy_message_filters (account_id, keyword, filter_type, enabled, user_id)
+        VALUES (:account_id, :keyword, :filter_type, 1, :user_id)
     """)
     last_insert_sql = text("SELECT LAST_INSERT_ID() as id")
     created_ids: List[int] = []
@@ -148,6 +149,7 @@ async def _create_message_filter_records(
                         "account_id": account_id,
                         "keyword": normalized_keyword,
                         "filter_type": filter_type,
+                        "user_id": owner_id,
                     },
                 )
                 await session.commit()
@@ -221,13 +223,15 @@ async def get_message_filters(
     # 查询过滤规则
     placeholders = ", ".join([f":acc_{i}" for i in range(len(account_ids))])
     params = {f"acc_{i}": acc_id for i, acc_id in enumerate(account_ids)}
-    
+    params["owner_id"] = owner_id
+
     sql = text(f"""
-        SELECT id, account_id, keyword, filter_type, enabled, 
+        SELECT id, account_id, keyword, filter_type, enabled,
                DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') as created_at,
                DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s') as updated_at
-        FROM xy_message_filters 
+        FROM xy_message_filters
         WHERE account_id IN ({placeholders})
+          AND (user_id = :owner_id OR user_id IS NULL)
         ORDER BY created_at DESC
     """)
     
@@ -273,6 +277,7 @@ async def create_message_filter(
         account_ids=[account_id],
         keyword=filter_data.keyword,
         filter_types=filter_data.filter_types,
+        owner_id=owner_id,
     )
 
 
@@ -302,6 +307,7 @@ async def create_message_filters_batch(
         account_ids=requested_account_ids,
         keyword=filter_data.keyword,
         filter_types=filter_data.filter_types,
+        owner_id=owner_id,
     )
 
 
@@ -327,6 +333,8 @@ async def update_message_filter(
     owner_id, _ = resolve_account_owner_scope(current_user)
     account = await account_service.get_account_for_user(owner_id, row.account_id)
     if not account:
+        raise HTTPException(status_code=404, detail="规则不存在")
+    if row.user_id is not None and row.user_id != owner_id:
         raise HTTPException(status_code=404, detail="规则不存在")
     
     # 构建更新语句
@@ -391,6 +399,8 @@ async def delete_message_filter(
     account = await account_service.get_account_for_user(owner_id, row.account_id)
     if not account:
         raise HTTPException(status_code=404, detail="规则不存在")
+    if row.user_id is not None and row.user_id != owner_id:
+        raise HTTPException(status_code=404, detail="规则不存在")
     
     await session.execute(
         text("DELETE FROM xy_message_filters WHERE id = :id"),
@@ -421,13 +431,18 @@ async def batch_delete_message_filters(
     params = {f"id_{i}": id for i, id in enumerate(request.ids)}
     
     result = await session.execute(
-        text(f"SELECT id, account_id FROM xy_message_filters WHERE id IN ({placeholders})"),
+        text(f"SELECT id, account_id, user_id FROM xy_message_filters WHERE id IN ({placeholders})"),
         params
     )
     rows = result.fetchall()
     
     # 验证权限，只删除用户有权限的规则
-    valid_ids = [row.id for row in rows if row.account_id in user_account_ids]
+    valid_ids = [
+        row.id
+        for row in rows
+        if row.account_id in user_account_ids
+        and (row.user_id is None or row.user_id == owner_id)
+    ]
     
     if not valid_ids:
         return ApiResponse(success=False, message="没有可删除的规则")
@@ -470,6 +485,8 @@ async def toggle_message_filter(
     owner_id, _ = resolve_account_owner_scope(current_user)
     account = await account_service.get_account_for_user(owner_id, row.account_id)
     if not account:
+        raise HTTPException(status_code=404, detail="规则不存在")
+    if row.user_id is not None and row.user_id != owner_id:
         raise HTTPException(status_code=404, detail="规则不存在")
     
     new_enabled = 0 if row.enabled else 1

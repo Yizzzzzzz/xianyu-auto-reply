@@ -22,7 +22,7 @@ from common.models.user import User
 from common.models.auto_rate_config import AutoRateConfig
 from common.models.xy_account import XYAccount
 from common.schemas.common import ApiResponse
-from common.utils.auth_scope import resolve_account_owner_scope
+from common.utils.auth_scope import resolve_account_owner_scope, user_scope_condition
 from app.services.account_service import AccountService
 
 router = APIRouter(tags=["auto-rate"])
@@ -66,7 +66,10 @@ async def get_auto_rate_config(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="账号不存在")
     
     # 查询配置
-    stmt = select(AutoRateConfig).where(AutoRateConfig.account_id == account_id)
+    stmt = select(AutoRateConfig).where(
+        AutoRateConfig.account_id == account_id,
+        user_scope_condition(AutoRateConfig, owner_id),
+    )
     result = await db.execute(stmt)
     config = result.scalars().first()
     
@@ -132,13 +135,16 @@ async def update_auto_rate_config(
     else:
         thanks_content = None
     
-    # 查询或创建配置
+    # 查询或创建配置（按账号查找，不加 user 过滤，避免同一账号出现重复行；
+    # 路由层已校验账号归属，写时把 user_id 认领为当前账号归属人）
     stmt = select(AutoRateConfig).where(AutoRateConfig.account_id == account_id)
     result = await db.execute(stmt)
     config = result.scalars().first()
     
     if config:
         # 更新
+        if config.user_id != owner_id:
+            config.user_id = owner_id
         config.enabled = config_update.enabled
         config.rate_type = config_update.rate_type
         config.text_content = config_update.text_content
@@ -149,6 +155,7 @@ async def update_auto_rate_config(
         # 创建
         config = AutoRateConfig(
             account_id=account_id,
+            user_id=owner_id,
             enabled=config_update.enabled,
             rate_type=config_update.rate_type,
             text_content=config_update.text_content,
@@ -282,6 +289,7 @@ async def batch_rate_orders(
             stmt = select(AutoRateConfig).where(
                 AutoRateConfig.account_id == account_id,
                 AutoRateConfig.enabled == True,
+                user_scope_condition(AutoRateConfig, owner_id),
             )
             config_result = await db.execute(stmt)
             rate_config = config_result.scalars().first()

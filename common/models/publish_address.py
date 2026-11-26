@@ -30,6 +30,7 @@ class PublishAddress(TimestampMixin, Base):
     search_keyword: Mapped[str] = mapped_column(String(200), nullable=False, comment="地址搜索关键词")
     expected_text: Mapped[str | None] = mapped_column(String(200), comment="期望命中的候选文本")
     account_id: Mapped[str | None] = mapped_column(String(80), index=True, comment="限定使用的闲鱼账号ID，空表示全局通用")
+    user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True, comment="归属平台用户ID（xy_users.id），空表示全局共用/未归属的历史数据")
     weight: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1", comment="随机权重")
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=100, server_default="100", comment="排序值")
     is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1", comment="是否启用")

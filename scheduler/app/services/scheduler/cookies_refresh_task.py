@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from loguru import logger
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
+from common.utils.auth_scope import get_account_owner_id
 
 from common.db.session import async_session_maker
 from common.models.cookie_refresh_schedule import CookieRefreshSchedule
@@ -197,6 +198,7 @@ class CookiesRefreshTaskService:
         expire_at = self._build_initial_expire_at(now)
         schedule = CookieRefreshSchedule(
             account_id=account_id,
+            user_id=await get_account_owner_id(session, account_id),
             expire_at=expire_at,
             last_status="initialized",
             last_error_message=None,
@@ -218,6 +220,9 @@ class CookiesRefreshTaskService:
         """处理单个账号的Cookie续期。"""
         now = get_beijing_now_naive()
         schedule = await self._get_schedule(session, account.account_id)
+        if schedule is not None and schedule.user_id is None and account.owner_id is not None:
+            # 存量计划回填归属（随本次流程的后续 commit 落库）
+            schedule.user_id = account.owner_id
         if not schedule:
             return await self._initialize_schedule(session, account.account_id, now)
 
@@ -286,6 +291,7 @@ class CookiesRefreshTaskService:
         log_record = ScheduledCookiesRefreshLog(
             batch_id=batch_id,
             account_id=account_id,
+            user_id=await get_account_owner_id(session, account_id),
             status=result.status or "failed",
             updated_cookie_count=result.updated_cookie_count,
             next_expire_at=result.next_expire_at,

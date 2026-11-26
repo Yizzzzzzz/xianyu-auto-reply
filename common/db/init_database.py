@@ -743,6 +743,7 @@ class DatabaseInitializer:
             CREATE TABLE IF NOT EXISTS xy_default_replies (
                 id INT PRIMARY KEY AUTO_INCREMENT COMMENT '回复ID',
                 account_id VARCHAR(80) NOT NULL COMMENT '账号标识',
+                user_id BIGINT DEFAULT NULL COMMENT '归属平台用户ID（xy_users.id），空表示未归属的历史数据',
                 item_id VARCHAR(64) DEFAULT NULL COMMENT '商品ID(空为账号默认回复)',
                 enabled TINYINT(1) DEFAULT 0 COMMENT '是否启用',
                 reply_type VARCHAR(32) DEFAULT 'text' COMMENT '回复类型：text-文本，api-接口，external_contact-站外联系方式',
@@ -958,6 +959,7 @@ class DatabaseInitializer:
             CREATE TABLE IF NOT EXISTS xy_message_filters (
                 id INT PRIMARY KEY AUTO_INCREMENT COMMENT '规则ID',
                 account_id VARCHAR(80) NOT NULL COMMENT '账号标识',
+                user_id BIGINT DEFAULT NULL COMMENT '归属平台用户ID（xy_users.id），空表示未归属的历史数据',
                 keyword VARCHAR(255) NOT NULL COMMENT '过滤关键词',
                 filter_type VARCHAR(20) NOT NULL COMMENT '过滤类型',
                 enabled TINYINT(1) DEFAULT 1 COMMENT '是否启用',
@@ -1083,6 +1085,7 @@ class DatabaseInitializer:
                 `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键ID',
                 `batch_id` VARCHAR(36) NOT NULL COMMENT '批次ID',
                 `account_id` VARCHAR(80) NOT NULL COMMENT '账号ID',
+                user_id BIGINT DEFAULT NULL COMMENT '归属平台用户ID（xy_users.id），空表示未归属的历史数据',
                 `order_no` VARCHAR(64) NOT NULL COMMENT '订单号',
                 `status` VARCHAR(20) NOT NULL COMMENT '状态',
                 `error_message` VARCHAR(500) DEFAULT NULL COMMENT '错误信息',
@@ -1128,6 +1131,7 @@ class DatabaseInitializer:
             CREATE TABLE IF NOT EXISTS xy_confirm_receipt_messages (
                 id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键ID',
                 account_id VARCHAR(80) NOT NULL COMMENT '账号ID',
+                user_id BIGINT DEFAULT NULL COMMENT '归属平台用户ID（xy_users.id），空表示未归属的历史数据',
                 enabled TINYINT(1) DEFAULT 0 COMMENT '是否启用',
                 message_content TEXT COMMENT '消息文本内容',
                 message_image VARCHAR(512) COMMENT '消息图片URL',
@@ -1142,6 +1146,7 @@ class DatabaseInitializer:
             CREATE TABLE IF NOT EXISTS xy_auto_rate_configs (
                 id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键ID',
                 account_id VARCHAR(80) NOT NULL COMMENT '账号ID',
+                user_id BIGINT DEFAULT NULL COMMENT '归属平台用户ID（xy_users.id），空表示未归属的历史数据',
                 enabled TINYINT(1) DEFAULT 0 COMMENT '是否启用自动评价',
                 rate_type VARCHAR(20) DEFAULT 'text' COMMENT '评价类型',
                 text_content TEXT COMMENT '固定评价文字内容',
@@ -1160,6 +1165,7 @@ class DatabaseInitializer:
                 `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键ID',
                 `batch_id` VARCHAR(36) NOT NULL COMMENT '批次ID',
                 `account_id` VARCHAR(80) NOT NULL COMMENT '账号ID',
+                user_id BIGINT DEFAULT NULL COMMENT '归属平台用户ID（xy_users.id），空表示未归属的历史数据',
                 `order_no` VARCHAR(64) NOT NULL COMMENT '订单号',
                 `status` VARCHAR(20) NOT NULL COMMENT '状态',
                 `error_message` VARCHAR(500) DEFAULT NULL COMMENT '错误信息',
@@ -1180,6 +1186,7 @@ class DatabaseInitializer:
                 `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键ID',
                 `batch_id` VARCHAR(36) NOT NULL COMMENT '批次ID',
                 `account_id` VARCHAR(80) NOT NULL COMMENT '账号ID',
+                user_id BIGINT DEFAULT NULL COMMENT '归属平台用户ID（xy_users.id），空表示未归属的历史数据',
                 `item_id` VARCHAR(64) NOT NULL COMMENT '商品ID',
                 `status` VARCHAR(20) NOT NULL COMMENT '状态',
                 `error_message` VARCHAR(500) DEFAULT NULL COMMENT '错误信息',
@@ -1200,6 +1207,7 @@ class DatabaseInitializer:
                 `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键ID',
                 `batch_id` VARCHAR(36) NOT NULL COMMENT '批次ID',
                 `account_id` VARCHAR(80) NOT NULL COMMENT '账号ID',
+                user_id BIGINT DEFAULT NULL COMMENT '归属平台用户ID（xy_users.id），空表示未归属的历史数据',
                 `status` VARCHAR(20) NOT NULL COMMENT '状态：success/token_refreshed/session_expired/failed',
                 `error_message` VARCHAR(500) DEFAULT NULL COMMENT '错误信息或处理说明',
                 `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
@@ -1217,6 +1225,7 @@ class DatabaseInitializer:
                 `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键ID',
                 `batch_id` VARCHAR(36) NOT NULL COMMENT '批次ID',
                 `account_id` VARCHAR(80) NOT NULL COMMENT '账号ID',
+                user_id BIGINT DEFAULT NULL COMMENT '归属平台用户ID（xy_users.id），空表示未归属的历史数据',
                 `token_user_id` VARCHAR(128) NOT NULL COMMENT 'Token缓存用户ID（myid）',
                 `status` VARCHAR(20) NOT NULL COMMENT '状态：success/failed',
                 `renew_expire_at` DATETIME DEFAULT NULL COMMENT '续期Token到期时间',
@@ -1237,6 +1246,7 @@ class DatabaseInitializer:
             CREATE TABLE IF NOT EXISTS `xy_cookie_refresh_schedules` (
                 `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键ID',
                 `account_id` VARCHAR(80) NOT NULL COMMENT '账号ID',
+                user_id BIGINT DEFAULT NULL COMMENT '归属平台用户ID（xy_users.id），空表示未归属的历史数据',
                 `expire_at` DATETIME NOT NULL COMMENT '当前Cookie续期到期时间',
                 `last_refresh_at` DATETIME DEFAULT NULL COMMENT '最近一次续期成功时间',
                 `last_status` VARCHAR(20) DEFAULT NULL COMMENT '最近一次状态：initialized/success/failed',
@@ -1256,6 +1266,7 @@ class DatabaseInitializer:
                 `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键ID',
                 `batch_id` VARCHAR(36) NOT NULL COMMENT '批次ID',
                 `account_id` VARCHAR(80) NOT NULL COMMENT '账号ID',
+                user_id BIGINT DEFAULT NULL COMMENT '归属平台用户ID（xy_users.id），空表示未归属的历史数据',
                 `status` VARCHAR(20) NOT NULL COMMENT '状态：initialized/success/failed',
                 `updated_cookie_count` INT NOT NULL DEFAULT 0 COMMENT '本次增量更新的Cookie字段数量',
                 `next_expire_at` DATETIME DEFAULT NULL COMMENT '下次到期时间',
@@ -1276,6 +1287,7 @@ class DatabaseInitializer:
                 `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键ID',
                 `batch_id` VARCHAR(36) NOT NULL COMMENT '批次ID，标识一次定时任务执行',
                 `account_id` VARCHAR(80) NOT NULL COMMENT '账号ID',
+                user_id BIGINT DEFAULT NULL COMMENT '归属平台用户ID（xy_users.id），空表示未归属的历史数据',
                 `status` VARCHAR(30) NOT NULL COMMENT '状态：success/cookie_updated/browser_renewed/need_password_login/failed',
                 `updated_cookie_count` INT NOT NULL DEFAULT 0 COMMENT '本次更新的Cookie字段数量',
                 `updated_cookie_names` TEXT DEFAULT NULL COMMENT '本次更新的Cookie字段名列表（逗号分隔）',
@@ -1559,6 +1571,7 @@ class DatabaseInitializer:
                 `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键ID',
                 `batch_id` VARCHAR(36) NOT NULL COMMENT '批次ID',
                 `account_id` VARCHAR(80) NOT NULL COMMENT '账号ID',
+                user_id BIGINT DEFAULT NULL COMMENT '归属平台用户ID（xy_users.id），空表示未归属的历史数据',
                 `order_no` VARCHAR(64) NOT NULL COMMENT '订单号',
                 `status` VARCHAR(20) NOT NULL COMMENT '状态：success/failed',
                 `error_message` VARCHAR(500) DEFAULT NULL COMMENT '错误信息',
@@ -1577,6 +1590,7 @@ class DatabaseInitializer:
                 `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键ID',
                 `batch_id` VARCHAR(36) NOT NULL COMMENT '批次ID',
                 `account_id` VARCHAR(80) NOT NULL COMMENT '账号ID',
+                user_id BIGINT DEFAULT NULL COMMENT '归属平台用户ID（xy_users.id），空表示未归属的历史数据',
                 `status` VARCHAR(20) NOT NULL COMMENT '状态：success/failed',
                 `error_message` VARCHAR(500) DEFAULT NULL COMMENT '错误信息',
                 `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
@@ -1676,6 +1690,7 @@ class DatabaseInitializer:
                 search_keyword VARCHAR(200) NOT NULL COMMENT '地址搜索关键词',
                 expected_text VARCHAR(200) DEFAULT NULL COMMENT '期望命中的候选文本',
                 account_id VARCHAR(80) DEFAULT NULL COMMENT '限定使用的闲鱼账号ID，空表示全局通用',
+                user_id BIGINT DEFAULT NULL COMMENT '归属平台用户ID（xy_users.id），空表示全局共用/未归属的历史数据',
                 weight INT NOT NULL DEFAULT 1 COMMENT '随机权重',
                 sort_order INT NOT NULL DEFAULT 100 COMMENT '排序值',
                 is_enabled TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否启用',
@@ -1924,6 +1939,7 @@ class DatabaseInitializer:
             CREATE TABLE IF NOT EXISTS xy_delivery_block_rules (
                 id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键ID',
                 account_id VARCHAR(64) NOT NULL COMMENT '账号ID',
+                user_id BIGINT DEFAULT NULL COMMENT '归属平台用户ID（xy_users.id），空表示未归属的历史数据',
                 rule_code VARCHAR(50) NOT NULL COMMENT '规则编码',
                 enabled TINYINT(1) NOT NULL DEFAULT 0 COMMENT '规则开关',
                 priority INT NOT NULL DEFAULT 0 COMMENT '执行优先级（越小越先执行）',
@@ -1949,6 +1965,7 @@ class DatabaseInitializer:
                 status VARCHAR(20) NOT NULL DEFAULT 'qrcode_ready' COMMENT '状态：qrcode_ready/scanning/success/failed',
                 qr_code_url LONGTEXT DEFAULT NULL COMMENT '二维码图片base64 data URL',
                 account_id VARCHAR(80) DEFAULT NULL COMMENT '扫码成功后的闲鱼账号ID（unb）',
+                user_id BIGINT DEFAULT NULL COMMENT '归属平台用户ID（xy_users.id），空表示未归属的历史数据',
                 cookie_saved TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'Cookie是否已保存到账号表',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
@@ -2267,6 +2284,7 @@ class DatabaseInitializer:
         "xy_auto_rate_configs": [
             ("thanks_enabled", "TINYINT(1) DEFAULT 0 COMMENT '好评后自动发送消息开关'", "api_url"),
             ("thanks_content", "TEXT COMMENT '好评后发送的消息内容'", "thanks_enabled"),
+            ("user_id", "BIGINT DEFAULT NULL COMMENT '归属平台用户ID（xy_users.id），空表示未归属的历史数据'", "account_id"),
         ],
         "xy_cards": [
             ("delivery_count", "INT DEFAULT 0 COMMENT '发货次数'", "delay_seconds"),
@@ -2308,6 +2326,7 @@ class DatabaseInitializer:
             ("location_latitude", "VARCHAR(32) DEFAULT NULL COMMENT '站外联系方式纬度'", "location_longitude"),
             ("location_title", "VARCHAR(128) DEFAULT NULL COMMENT '站外联系方式位置标题'", "location_latitude"),
             ("location_subtitle", "VARCHAR(255) DEFAULT NULL COMMENT '站外联系方式位置副标题'", "location_title"),
+            ("user_id", "BIGINT DEFAULT NULL COMMENT '归属平台用户ID（xy_users.id），空表示未归属的历史数据'", "account_id"),
         ],
         "xy_default_reply_records": [
             ("item_id", "VARCHAR(64) DEFAULT NULL COMMENT '商品ID'", "account_id"),
@@ -2351,7 +2370,52 @@ class DatabaseInitializer:
         "xy_account_login_logs": [
             ("updated_cookie_names", "VARCHAR(500) DEFAULT NULL COMMENT '接口续期更新的Cookie字段名（逗号分隔）'", "error_message"),
         ],
-    }
+            "xy_confirm_receipt_messages": [
+            ("user_id", "BIGINT DEFAULT NULL COMMENT '归属平台用户ID（xy_users.id），空表示未归属的历史数据'", "account_id"),
+        ],
+        "xy_cookie_refresh_schedules": [
+            ("user_id", "BIGINT DEFAULT NULL COMMENT '归属平台用户ID（xy_users.id），空表示未归属的历史数据'", "account_id"),
+        ],
+        "xy_delivery_block_rules": [
+            ("user_id", "BIGINT DEFAULT NULL COMMENT '归属平台用户ID（xy_users.id），空表示未归属的历史数据'", "account_id"),
+        ],
+        "xy_message_filters": [
+            ("user_id", "BIGINT DEFAULT NULL COMMENT '归属平台用户ID（xy_users.id），空表示未归属的历史数据'", "account_id"),
+        ],
+        "xy_publish_addresses": [
+            ("user_id", "BIGINT DEFAULT NULL COMMENT '归属平台用户ID（xy_users.id），空表示全局共用/未归属的历史数据'", "account_id"),
+        ],
+        "xy_scheduled_api_cookie_renew_log": [
+            ("user_id", "BIGINT DEFAULT NULL COMMENT '归属平台用户ID（xy_users.id），空表示未归属的历史数据'", "account_id"),
+        ],
+        "xy_scheduled_close_notice_log": [
+            ("user_id", "BIGINT DEFAULT NULL COMMENT '归属平台用户ID（xy_users.id），空表示未归属的历史数据'", "account_id"),
+        ],
+        "xy_scheduled_cookies_refresh_log": [
+            ("user_id", "BIGINT DEFAULT NULL COMMENT '归属平台用户ID（xy_users.id），空表示未归属的历史数据'", "account_id"),
+        ],
+        "xy_scheduled_login_renew_log": [
+            ("user_id", "BIGINT DEFAULT NULL COMMENT '归属平台用户ID（xy_users.id），空表示未归属的历史数据'", "account_id"),
+        ],
+        "xy_scheduled_polish_log": [
+            ("user_id", "BIGINT DEFAULT NULL COMMENT '归属平台用户ID（xy_users.id），空表示未归属的历史数据'", "account_id"),
+        ],
+        "xy_scheduled_rate_log": [
+            ("user_id", "BIGINT DEFAULT NULL COMMENT '归属平台用户ID（xy_users.id），空表示未归属的历史数据'", "account_id"),
+        ],
+        "xy_scheduled_red_flower_log": [
+            ("user_id", "BIGINT DEFAULT NULL COMMENT '归属平台用户ID（xy_users.id），空表示未归属的历史数据'", "account_id"),
+        ],
+        "xy_scheduled_redelivery_log": [
+            ("user_id", "BIGINT DEFAULT NULL COMMENT '归属平台用户ID（xy_users.id），空表示未归属的历史数据'", "account_id"),
+        ],
+        "xy_scheduled_token_renewal_log": [
+            ("user_id", "BIGINT DEFAULT NULL COMMENT '归属平台用户ID（xy_users.id），空表示未归属的历史数据'", "account_id"),
+        ],
+        "xy_shared_scan_workers": [
+            ("user_id", "BIGINT DEFAULT NULL COMMENT '归属平台用户ID（xy_users.id），空表示未归属的历史数据'", "account_id"),
+        ],
+}
 
     async def init_all(self):
         """初始化所有数据库内容"""
@@ -3974,6 +4038,45 @@ class DatabaseInitializer:
             except Exception as e:
                 logger.warning(f"✗ xy_accounts uk_account_id 创建失败: {e}")
 
+
+            # 账号归属表 user_id 索引：配合 COLUMN_MIGRATIONS 的 user_id 列，
+            # 供按归属过滤查询使用；幂等，已存在则跳过。
+            for _table in (
+                "xy_auto_rate_configs",
+                "xy_confirm_receipt_messages",
+                "xy_cookie_refresh_schedules",
+                "xy_default_replies",
+                "xy_delivery_block_rules",
+                "xy_message_filters",
+                "xy_publish_addresses",
+                "xy_scheduled_api_cookie_renew_log",
+                "xy_scheduled_close_notice_log",
+                "xy_scheduled_cookies_refresh_log",
+                "xy_scheduled_login_renew_log",
+                "xy_scheduled_polish_log",
+                "xy_scheduled_rate_log",
+                "xy_scheduled_red_flower_log",
+                "xy_scheduled_redelivery_log",
+                "xy_scheduled_token_renewal_log",
+                "xy_shared_scan_workers",
+            ):
+                try:
+                    check = text(
+                        f"""
+                        SELECT COUNT(*) FROM information_schema.STATISTICS
+                        WHERE TABLE_SCHEMA = DATABASE()
+                        AND TABLE_NAME = '{_table}'
+                        AND INDEX_NAME = 'idx_user_id'
+                        """
+                    )
+                    result = await conn.execute(check)
+                    if result.scalar() == 0:
+                        await conn.execute(text(
+                            f"ALTER TABLE {_table} ADD INDEX idx_user_id (user_id)"
+                        ))
+                        logger.info(f"✓ {_table}: 创建 idx_user_id 索引")
+                except Exception as e:
+                    logger.warning(f"✗ {_table} idx_user_id 创建失败: {e}")
 
     async def create_default_admin(self):
         """创建默认管理员用户 (admin/admin123)"""

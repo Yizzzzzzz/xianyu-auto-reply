@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, Query
 from loguru import logger
-from sqlalchemy import case, delete, func, select
+from sqlalchemy import case, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api import deps
@@ -46,7 +46,7 @@ async def list_api_cookie_renew_batches(
     end_date: str | None = Query(default=None, description="结束日期，格式：YYYY-MM-DD"),
     page: int = Query(default=1, ge=1, description="页码"),
     page_size: int = Query(default=20, ge=1, le=100, description="每页数量"),
-    _: User = Depends(deps.get_current_admin_user),
+    current_user: User = Depends(deps.get_current_admin_user),
     session: AsyncSession = Depends(deps.get_db_session),
 ) -> dict:
     """获取接口续期Cookies批次列表。"""
@@ -70,6 +70,12 @@ async def list_api_cookie_renew_batches(
             case((ScheduledApiCookieRenewLog.status == "failed", 1), else_=0)
         ).label("failed_count"),
     ).group_by(ScheduledApiCookieRenewLog.batch_id)
+    base_query = base_query.where(
+        or_(
+            ScheduledApiCookieRenewLog.user_id == current_user.id,
+            ScheduledApiCookieRenewLog.user_id.is_(None),
+        )
+    )
 
     if start_date:
         try:
@@ -145,7 +151,7 @@ async def list_api_cookie_renew_batches(
 @router.get("/api-cookie-renew-batches/{batch_id}")
 async def get_api_cookie_renew_batch_detail(
     batch_id: str,
-    _: User = Depends(deps.get_current_admin_user),
+    current_user: User = Depends(deps.get_current_admin_user),
     session: AsyncSession = Depends(deps.get_db_session),
 ) -> dict:
     """获取接口续期Cookies批次详情。"""
@@ -167,7 +173,13 @@ async def get_api_cookie_renew_batch_detail(
         func.sum(
             case((ScheduledApiCookieRenewLog.status == "failed", 1), else_=0)
         ).label("failed_count"),
-    ).where(ScheduledApiCookieRenewLog.batch_id == batch_id)
+    ).where(
+        ScheduledApiCookieRenewLog.batch_id == batch_id,
+        or_(
+            ScheduledApiCookieRenewLog.user_id == current_user.id,
+            ScheduledApiCookieRenewLog.user_id.is_(None),
+        ),
+    )
     summary = (await session.execute(summary_stmt)).first()
 
     if not summary or summary.total_accounts == 0:
@@ -179,7 +191,13 @@ async def get_api_cookie_renew_batch_detail(
 
     logs_stmt = (
         select(ScheduledApiCookieRenewLog)
-        .where(ScheduledApiCookieRenewLog.batch_id == batch_id)
+        .where(
+            ScheduledApiCookieRenewLog.batch_id == batch_id,
+            or_(
+                ScheduledApiCookieRenewLog.user_id == current_user.id,
+                ScheduledApiCookieRenewLog.user_id.is_(None),
+            ),
+        )
         .order_by(ScheduledApiCookieRenewLog.created_at.asc())
     )
     logs = (await session.execute(logs_stmt)).scalars().all()
@@ -217,14 +235,18 @@ async def get_api_cookie_renew_batch_detail(
 
 @router.delete("/api-cookie-renew-logs/clear")
 async def clear_api_cookie_renew_logs(
-    _: User = Depends(deps.get_current_admin_user),
+    current_user: User = Depends(deps.get_current_admin_user),
     session: AsyncSession = Depends(deps.get_db_session),
 ) -> dict:
     """清空10天前的接口续期Cookies日志（保留最近10天）。"""
     try:
         ten_days_ago = get_beijing_now_naive() - timedelta(days=10)
         stmt = delete(ScheduledApiCookieRenewLog).where(
-            ScheduledApiCookieRenewLog.created_at < ten_days_ago
+            ScheduledApiCookieRenewLog.created_at < ten_days_ago,
+            or_(
+                ScheduledApiCookieRenewLog.user_id == current_user.id,
+                ScheduledApiCookieRenewLog.user_id.is_(None),
+            ),
         )
         result = await session.execute(stmt)
         await session.commit()

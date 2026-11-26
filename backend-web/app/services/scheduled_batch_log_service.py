@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from common.models.scheduled_polish_log import ScheduledPolishLog
@@ -55,9 +55,14 @@ class ScheduledBatchLogService:
         model: Any,
         start_dt: datetime | None,
         end_dt: datetime | None,
+        owner_id: int | None = None,
     ):
         """按创建时间先筛选候选批次，减少后续聚合扫描范围。"""
         stmt = select(model.batch_id.label("batch_id")).distinct()
+        if owner_id is not None:
+            stmt = stmt.where(
+                or_(model.user_id == owner_id, model.user_id.is_(None))
+            )
         if start_dt is not None:
             stmt = stmt.where(model.created_at >= start_dt)
         if end_dt is not None:
@@ -70,6 +75,7 @@ class ScheduledBatchLogService:
         model: Any,
         start_dt: datetime | None,
         end_dt: datetime | None,
+        owner_id: int | None = None,
     ):
         """构建按批次聚合后的汇总子查询。"""
         stmt = select(
@@ -85,8 +91,14 @@ class ScheduledBatchLogService:
                 model=model,
                 start_dt=start_dt,
                 end_dt=end_dt,
+                owner_id=owner_id,
             )
             stmt = stmt.join(candidate_batches, candidate_batches.c.batch_id == model.batch_id)
+
+        if owner_id is not None:
+            stmt = stmt.where(
+                or_(model.user_id == owner_id, model.user_id.is_(None))
+            )
 
         stmt = stmt.group_by(model.batch_id)
         return stmt.subquery()
@@ -122,6 +134,7 @@ class ScheduledBatchLogService:
         page: int,
         page_size: int,
         total_key: str,
+        owner_id: int | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         """统一分页查询批次列表。"""
         start_dt = self._parse_start_date(start_date)
@@ -132,6 +145,7 @@ class ScheduledBatchLogService:
             model=model,
             start_dt=start_dt,
             end_dt=end_dt,
+            owner_id=owner_id,
         )
 
         total = await self._count_summary_rows(
@@ -176,6 +190,7 @@ class ScheduledBatchLogService:
         detail_key: str,
         detail_column: Any,
         extra_columns: dict[str, Any] | None = None,
+        owner_id: int | None = None,
     ) -> dict[str, Any] | None:
         """统一查询批次详情，只提取页面实际需要的字段。"""
         summary_stmt = select(
@@ -184,6 +199,10 @@ class ScheduledBatchLogService:
             func.sum(case((model.status == "success", 1), else_=0)).label("success_count"),
             func.sum(case((model.status == "failed", 1), else_=0)).label("failed_count"),
         ).where(model.batch_id == batch_id)
+        if owner_id is not None:
+            summary_stmt = summary_stmt.where(
+                or_(model.user_id == owner_id, model.user_id.is_(None))
+            )
 
         summary_result = await self.session.execute(summary_stmt)
         summary = summary_result.first()
@@ -208,6 +227,10 @@ class ScheduledBatchLogService:
             .where(model.batch_id == batch_id)
             .order_by(model.created_at.asc())
         )
+        if owner_id is not None:
+            logs_stmt = logs_stmt.where(
+                or_(model.user_id == owner_id, model.user_id.is_(None))
+            )
 
         logs_result = await self.session.execute(logs_stmt)
         logs_rows = logs_result.all()
@@ -244,6 +267,7 @@ class ScheduledBatchLogService:
         end_date: str | None,
         page: int,
         page_size: int,
+        owner_id: int | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         """分页查询补发货批次列表。"""
         return await self._list_batches(
@@ -253,13 +277,15 @@ class ScheduledBatchLogService:
             page=page,
             page_size=page_size,
             total_key="total_orders",
+            owner_id=owner_id,
         )
 
-    async def get_redelivery_batch_detail(self, batch_id: str) -> dict[str, Any] | None:
+    async def get_redelivery_batch_detail(self, batch_id: str, owner_id: int | None = None) -> dict[str, Any] | None:
         """查询补发货批次详情。"""
         return await self._get_batch_detail(
             model=ScheduledRedeliveryLog,
             batch_id=batch_id,
+            owner_id=owner_id,
             total_key="total_orders",
             detail_key="order_no",
             detail_column=ScheduledRedeliveryLog.order_no,
@@ -272,6 +298,7 @@ class ScheduledBatchLogService:
         end_date: str | None,
         page: int,
         page_size: int,
+        owner_id: int | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         """分页查询 Token 续期批次列表。"""
         return await self._list_batches(
@@ -281,16 +308,19 @@ class ScheduledBatchLogService:
             page=page,
             page_size=page_size,
             total_key="total_accounts",
+            owner_id=owner_id,
         )
 
     async def get_token_renewal_batch_detail(
         self,
         batch_id: str,
+        owner_id: int | None = None,
     ) -> dict[str, Any] | None:
         """查询 Token 续期批次详情。"""
         return await self._get_batch_detail(
             model=ScheduledTokenRenewalLog,
             batch_id=batch_id,
+            owner_id=owner_id,
             total_key="total_accounts",
             detail_key="token_user_id",
             detail_column=ScheduledTokenRenewalLog.token_user_id,
@@ -306,6 +336,7 @@ class ScheduledBatchLogService:
         end_date: str | None,
         page: int,
         page_size: int,
+        owner_id: int | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         """分页查询补评价批次列表。"""
         return await self._list_batches(
@@ -315,13 +346,15 @@ class ScheduledBatchLogService:
             page=page,
             page_size=page_size,
             total_key="total_orders",
+            owner_id=owner_id,
         )
 
-    async def get_rate_batch_detail(self, batch_id: str) -> dict[str, Any] | None:
+    async def get_rate_batch_detail(self, batch_id: str, owner_id: int | None = None) -> dict[str, Any] | None:
         """查询补评价批次详情。"""
         return await self._get_batch_detail(
             model=ScheduledRateLog,
             batch_id=batch_id,
+            owner_id=owner_id,
             total_key="total_orders",
             detail_key="order_no",
             detail_column=ScheduledRateLog.order_no,
@@ -334,6 +367,7 @@ class ScheduledBatchLogService:
         end_date: str | None,
         page: int,
         page_size: int,
+        owner_id: int | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         """分页查询擦亮批次列表。"""
         return await self._list_batches(
@@ -343,13 +377,15 @@ class ScheduledBatchLogService:
             page=page,
             page_size=page_size,
             total_key="total_items",
+            owner_id=owner_id,
         )
 
-    async def get_polish_batch_detail(self, batch_id: str) -> dict[str, Any] | None:
+    async def get_polish_batch_detail(self, batch_id: str, owner_id: int | None = None) -> dict[str, Any] | None:
         """查询擦亮批次详情。"""
         return await self._get_batch_detail(
             model=ScheduledPolishLog,
             batch_id=batch_id,
+            owner_id=owner_id,
             total_key="total_items",
             detail_key="item_id",
             detail_column=ScheduledPolishLog.item_id,
@@ -362,6 +398,7 @@ class ScheduledBatchLogService:
         end_date: str | None,
         page: int,
         page_size: int,
+        owner_id: int | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         """分页查询求小红花批次列表。"""
         return await self._list_batches(
@@ -371,13 +408,15 @@ class ScheduledBatchLogService:
             page=page,
             page_size=page_size,
             total_key="total_orders",
+            owner_id=owner_id,
         )
 
-    async def get_red_flower_batch_detail(self, batch_id: str) -> dict[str, Any] | None:
+    async def get_red_flower_batch_detail(self, batch_id: str, owner_id: int | None = None) -> dict[str, Any] | None:
         """查询求小红花批次详情。"""
         return await self._get_batch_detail(
             model=ScheduledRedFlowerLog,
             batch_id=batch_id,
+            owner_id=owner_id,
             total_key="total_orders",
             detail_key="order_no",
             detail_column=ScheduledRedFlowerLog.order_no,

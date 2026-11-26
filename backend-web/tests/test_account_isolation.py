@@ -48,7 +48,8 @@ class TestAccountIsolation(unittest.IsolatedAsyncioTestCase):
                     "account_id VARCHAR(80), "
                     "keyword VARCHAR(255), "
                     "filter_type VARCHAR(50), "
-                    "enabled INTEGER)"
+                    "enabled INTEGER, "
+                    "user_id INTEGER)"
                 )
             )
 
@@ -107,6 +108,19 @@ class TestAccountIsolation(unittest.IsolatedAsyncioTestCase):
             remark="用户2闲鱼号",
         )
         self.session.add_all([self.acc_admin, self.acc_user2])
+        await self.session.commit()
+
+        # 消息过滤规则：user_id 用于账号间隔离（本人行 + 未归属行可见）
+        # 用户 2 账号下 1 条自己的规则（user_id=2）和 1 条管理员的规则（user_id=1）；
+        # 管理员账号下 1 条自己的规则（user_id=1）。
+        await self.session.execute(
+            text(
+                "INSERT INTO xy_message_filters (account_id, keyword, filter_type, enabled, user_id) VALUES "
+                "('xy_user2_8888', 'kw-user2', 'skip_reply', 1, 2), "
+                "('xy_user2_8888', 'kw-admin-on-user2', 'skip_reply', 1, 1), "
+                "('xy057799537627', 'kw-admin', 'skip_reply', 1, 1)"
+            )
+        )
         await self.session.commit()
 
     async def asyncTearDown(self) -> None:
@@ -196,6 +210,8 @@ class TestAccountIsolation(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(details_user2), 1)
         self.assertEqual(details_user2[0].id, "xy_user2_8888")
         self.assertNotIn("xy057799537627", [d.id for d in details_user2])
+        # user_id 隔离：只统计自己的规则（user_id=2），管理员落在该账号下的规则不计入
+        self.assertEqual(details_user2[0].filter_count, 1)
 
         # 2. 新注册/无账号用户 3 请求详情：返回空列表 []
         details_empty = await list_cookie_details(
@@ -205,16 +221,17 @@ class TestAccountIsolation(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(details_empty, [])
 
-        # 3. 管理员请求详情：返回全部账号详情
+        # 3. 管理员请求详情：管理员之间也隔离（82c22ba），只返回自己的账号，
+        # 不再是全部账号；user_id 过滤同样只统计自己的规则
         details_admin = await list_cookie_details(
             current_user=self.admin_user,
             account_service=self.account_service,
             session=self.session,
         )
-        self.assertEqual(len(details_admin), 2)
-        admin_seen_ids = {d.id for d in details_admin}
-        self.assertIn("xy057799537627", admin_seen_ids)
-        self.assertIn("xy_user2_8888", admin_seen_ids)
+        self.assertEqual(len(details_admin), 1)
+        self.assertEqual(details_admin[0].id, "xy057799537627")
+        self.assertNotIn("xy_user2_8888", [d.id for d in details_admin])
+        self.assertEqual(details_admin[0].filter_count, 1)
 
 
 if __name__ == "__main__":

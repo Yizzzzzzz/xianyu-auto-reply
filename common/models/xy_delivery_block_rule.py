@@ -30,6 +30,7 @@ class XYDeliveryBlockRule(TimestampMixin, Base):
     account_id: Mapped[str] = mapped_column(
         String(64), nullable=False, index=True, comment="账号ID"
     )
+    user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True, comment="归属平台用户ID（xy_users.id），空表示未归属的历史数据")
 
     # 规则编码（唯一标识规则类型）
     rule_code: Mapped[str] = mapped_column(

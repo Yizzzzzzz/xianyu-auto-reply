@@ -26,4 +26,5 @@ class SharedScanWorker(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="qrcode_ready", comment="状态：qrcode_ready/scanning/success/failed")
     qr_code_url: Mapped[str | None] = mapped_column(Text, comment="二维码图片base64 data URL")
     account_id: Mapped[str | None] = mapped_column(String(80), index=True, comment="扫码成功后的闲鱼账号ID（unb）")
+    user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True, comment="归属平台用户ID（xy_users.id），空表示未归属的历史数据")
     cookie_saved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, comment="Cookie是否已保存到账号表")
