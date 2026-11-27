@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   Ban,
   BarChart3,
+  Coins,
   Bell,
   BellOff,
   BookOpen,
@@ -85,6 +86,7 @@ export const mainNavItems: NavEntry[] = [
     label: '数据分析',
     children: [
       { key: 'data-overview', icon: LineChart, label: '数据总览', path: '/data-analysis/overview' },
+      { key: 'token-usage', icon: Coins, label: 'Token 用量', path: '/data-analysis/token-usage' },
     ],
   },
   { key: 'accounts', icon: Users, label: '账号管理', path: '/accounts' },

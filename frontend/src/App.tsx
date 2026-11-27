@@ -25,6 +25,7 @@ const Dashboard = React.lazy(() => import('@/pages/dashboard/Dashboard').then(m 
 const Home = React.lazy(() => import('@/pages/home/Home').then(m => ({ default: m.Home })))
 const OnlineInstall = React.lazy(() => import('@/pages/online-install/OnlineInstall').then(m => ({ default: m.OnlineInstall })))
 const DataOverview = React.lazy(() => import('@/pages/data_analysis/DataOverview').then(m => ({ default: m.DataOverview })))
+const TokenUsage = React.lazy(() => import('@/pages/data_analysis/TokenUsage').then(m => ({ default: m.TokenUsage })))
 const Accounts = React.lazy(() => import('@/pages/accounts/Accounts').then(m => ({ default: m.Accounts })))
 const Items = React.lazy(() => import('@/pages/items/Items').then(m => ({ default: m.Items })))
 const Orders = React.lazy(() => import('@/pages/orders/Orders').then(m => ({ default: m.Orders })))
@@ -349,6 +350,7 @@ function App() {
           >
             <Route path="dashboard" element={<Dashboard />} />
             <Route path="data-analysis/overview" element={<DataOverview />} />
+            <Route path="data-analysis/token-usage" element={<TokenUsage />} />
             <Route path="accounts" element={<Accounts />} />
             <Route path="accounts/shared-scan" element={<SharedScanManager />} />
             <Route path="items" element={<Items />} />
