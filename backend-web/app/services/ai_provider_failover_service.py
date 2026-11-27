@@ -434,6 +434,7 @@ class AiProviderFailoverService:
         image_bytes: bytes,
         hint: Optional[str] = None,
         owner_id: Optional[int] = None,
+        enable_thinking: bool = False,
     ) -> dict[str, Any]:
         """根据商品图片生成闲鱼发布文案（容灾轮询）
 
@@ -502,6 +503,7 @@ class AiProviderFailoverService:
                 ],
                 "temperature": 0.7,
                 "max_tokens": 4096,
+                "thinking": {"type": "enabled" if enable_thinking else "disabled"},
             }
             headers = {
                 "Authorization": f"Bearer {plain_key}",
@@ -587,6 +589,7 @@ class AiProviderFailoverService:
         image_bytes: bytes,
         competitors: list[dict[str, object]],
         owner_id: Optional[int] = None,
+        enable_thinking: bool = False,
     ) -> dict[str, object]:
         """对照商品图片，从候选同款中挑最相关的一条并给出建议价（容灾轮询）
 
@@ -653,6 +656,7 @@ class AiProviderFailoverService:
                 ],
                 "temperature": 0.3,
                 "max_tokens": 2048,
+                "thinking": {"type": "enabled" if enable_thinking else "disabled"},
             }
             headers = {
                 "Authorization": f"Bearer {plain_key}",
@@ -741,6 +745,7 @@ class AiProviderFailoverService:
         image_bytes: bytes,
         hint: Optional[str] = None,
         owner_id: Optional[int] = None,
+        enable_thinking: bool = False,
     ) -> dict[str, Any]:
         """根据商品图片识别物品信息（容灾轮询）
 
@@ -809,6 +814,7 @@ class AiProviderFailoverService:
                 ],
                 "temperature": 0.7,
                 "max_tokens": 4096,
+                "thinking": {"type": "enabled" if enable_thinking else "disabled"},
             }
             headers = {
                 "Authorization": f"Bearer {plain_key}",
@@ -894,6 +900,202 @@ class AiProviderFailoverService:
             errors=provider_errors,
         )
 
+
+    async def identify_item_stream(
+        self,
+        image_bytes: bytes,
+        hint: Optional[str] = None,
+        enable_thinking: bool = False,
+        owner_id: Optional[int] = None,
+        providers: Optional[list[AiProviderConfig]] = None,
+    ) -> AsyncGenerator[str, None]:
+        """根据商品图片流式识别物品信息（SSE，走容灾调度）
+
+        与 identify_item 用同一提示词；流式返回模型原始文本增量，结束时
+        解析为结构化识别结果随 done 事件一并返回。
+
+        Args:
+            image_bytes: 图片二进制数据。
+            hint: 可选的补充要求或关键词。
+            enable_thinking: 是否允许模型深度思考（默认 False）。
+            owner_id: 平台用户 ID（仅用于 token 用量记账，流式无 usage 故不记账）。
+            providers: 可选已查询的启用服务商列表；若未提供则内部查询。
+
+        Yields:
+            str: SSE 格式事件字符串（thinking 思考、delta 增量、done 结束、error 异常）。
+                done 事件 data 为 {"event": "done", "provider_used": ..., "name": ...,
+                "category": ..., "description": ..., "search_keyword": ...}。
+        """
+        if not image_bytes:
+            raise ValueError("商品图片不能为空")
+
+        if providers is None:
+            providers = await self.get_enabled_providers()
+
+        if not providers:
+            raise NoProviderConfiguredError("未配置 AI 服务商，请先通过后端接口添加服务商")
+
+        prompt_text = await self._get_prompt(IDENTIFY_PROMPT_KEY, IDENTIFY_PROMPT)
+        if hint and hint.strip():
+            prompt_text += f"\n\n补充关键词与要求：{hint.strip()}"
+
+        base64_img = base64.b64encode(image_bytes).decode("utf-8")
+        has_emitted_delta = False
+
+        for provider in providers:
+            plain_key = ""
+            try:
+                plain_key = decrypt_api_key(provider.api_key, self._get_encryption_key())
+            except Exception as exc:
+                err_msg = f"解密 API Key 失败: {str(exc)}"
+                provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                await self.session.commit()
+                continue
+
+            url = build_openai_url(provider.base_url, "chat/completions")
+            payload = {
+                "model": provider.model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt_text},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{base64_img}"
+                                },
+                            },
+                        ],
+                    }
+                ],
+                "temperature": 0.7,
+                "max_tokens": 4096,
+                "thinking": {"type": "enabled" if enable_thinking else "disabled"},
+                "stream": True,
+            }
+            headers = {
+                "Authorization": f"Bearer {plain_key}",
+                "Content-Type": "application/json",
+            }
+            timeout_sec = float(provider.timeout_seconds or 30)
+
+            client_to_use = self._http_client
+            should_close = False
+            if client_to_use is None:
+                client_to_use = _create_async_client(timeout=timeout_sec)
+                should_close = True
+
+            raw_text_parts: list[str] = []
+            provider_emitted_in_this_turn = False
+            try:
+                async with client_to_use.stream("POST", url, json=payload, headers=headers, timeout=timeout_sec) as resp:
+                    if not resp.is_success:
+                        err_bytes = await resp.aread()
+                        err_summary = err_bytes.decode("utf-8", errors="replace")
+                        if plain_key and plain_key in err_summary:
+                            err_summary = err_summary.replace(plain_key, "****")
+                        err_msg = f"HTTP {resp.status_code}: {err_summary}"
+                        provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                        await self.session.commit()
+                        if has_emitted_delta:
+                            error_data = json.dumps({"event": "error", "error": f"[{provider.name}] {err_msg}"}, ensure_ascii=False)
+                            yield f"event: error\ndata: {error_data}\n\n"
+                            return
+                        continue
+
+                    async for raw_line in resp.aiter_lines():
+                        line = raw_line.strip()
+                        if not line:
+                            continue
+                        if line.startswith("data:"):
+                            data_str = line[5:].strip()
+                            if data_str == "[DONE]":
+                                break
+                            try:
+                                chunk = json.loads(data_str)
+                            except Exception:
+                                continue
+                            choices = chunk.get("choices")
+                            if not choices or not isinstance(choices, list):
+                                continue
+                            delta = choices[0].get("delta")
+                            if not delta or not isinstance(delta, dict):
+                                continue
+
+                            # 1. 优先提取并转发思考过程 reasoning_content
+                            reasoning = delta.get("reasoning_content")
+                            if isinstance(reasoning, str) and reasoning:
+                                thinking_payload = json.dumps({"thinking": reasoning}, ensure_ascii=False)
+                                yield f"event: thinking\ndata: {thinking_payload}\n\n"
+
+                            # 2. 提取正文增量 content
+                            content = delta.get("content")
+                            if isinstance(content, str) and content:
+                                has_emitted_delta = True
+                                provider_emitted_in_this_turn = True
+                                raw_text_parts.append(content)
+                                delta_payload = json.dumps({"delta": content}, ensure_ascii=False)
+                                yield f"data: {delta_payload}\n\n"
+
+                    if provider_emitted_in_this_turn:
+                        raw_text = "".join(raw_text_parts)
+                        try:
+                            identified = _parse_identify_json(raw_text)
+                        except Exception as exc:
+                            err_msg = f"识别结果解析失败: {str(exc)}"
+                            provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                            await self.session.commit()
+                            continue
+                        provider.last_error = None
+                        provider.last_used_at = datetime.now()
+                        await self.session.commit()
+                        done_payload = json.dumps(
+                            {
+                                "event": "done",
+                                "provider_used": provider.name,
+                                "name": identified["name"],
+                                "category": identified["category"],
+                                "description": identified["description"],
+                                "search_keyword": identified["search_keyword"],
+                            },
+                            ensure_ascii=False,
+                        )
+                        yield f"event: done\ndata: {done_payload}\n\n"
+                        return
+                    else:
+                        err_msg = "返回消息正文为空"
+                        provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                        await self.session.commit()
+                        continue
+
+            except httpx.TimeoutException:
+                err_msg = f"请求超时（{int(timeout_sec)}秒）"
+                provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                await self.session.commit()
+                if has_emitted_delta:
+                    error_data = json.dumps({"event": "error", "error": f"[{provider.name}] {err_msg}"}, ensure_ascii=False)
+                    yield f"event: error\ndata: {error_data}\n\n"
+                    return
+                continue
+            except Exception as exc:
+                err_msg = f"调用异常: {type(exc).__name__}: {str(exc)}"
+                if plain_key and plain_key in err_msg:
+                    err_msg = err_msg.replace(plain_key, "****")
+                provider.last_error = f"[{provider.name}] {err_msg}"[:1000]
+                await self.session.commit()
+                if has_emitted_delta:
+                    error_data = json.dumps({"event": "error", "error": f"[{provider.name}] {err_msg}"}, ensure_ascii=False)
+                    yield f"event: error\ndata: {error_data}\n\n"
+                    return
+                continue
+            finally:
+                if should_close:
+                    await client_to_use.aclose()
+
+        all_failed_payload = json.dumps({"event": "error", "error": "所有 AI 服务商均调用失败"}, ensure_ascii=False)
+        yield f"event: error\ndata: {all_failed_payload}\n\n"
+
     async def get_enabled_providers(self) -> list[AiProviderConfig]:
         """查询所有已启用的服务商配置，按 priority 升序、id 升序排列"""
         stmt = (
@@ -908,6 +1110,7 @@ class AiProviderFailoverService:
         self,
         messages: list[dict[str, Any]],
         owner_id: Optional[int] = None,
+        enable_thinking: bool = False,
     ) -> dict[str, Any]:
         """根据历史对话消息进行追问回复（容灾轮询）
 
@@ -955,6 +1158,7 @@ class AiProviderFailoverService:
                 "messages": full_messages,
                 "temperature": 0.7,
                 "max_tokens": 4096,
+                "thinking": {"type": "enabled" if enable_thinking else "disabled"},
             }
             headers = {
                 "Authorization": f"Bearer {plain_key}",
@@ -1031,6 +1235,7 @@ class AiProviderFailoverService:
         self,
         messages: list[dict[str, Any]],
         providers: Optional[list[AiProviderConfig]] = None,
+        enable_thinking: bool = False,
     ) -> AsyncGenerator[str, None]:
         """根据历史对话消息进行流式追问回复（SSE，走容灾调度）
 
@@ -1068,6 +1273,7 @@ class AiProviderFailoverService:
                 "messages": full_messages,
                 "temperature": 0.7,
                 "max_tokens": 4096,
+                "thinking": {"type": "enabled" if enable_thinking else "disabled"},
                 "stream": True,
             }
             headers = {

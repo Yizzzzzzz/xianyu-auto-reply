@@ -633,11 +633,14 @@ async def reset_ai_prompts(
     return await _load_prompt_settings(session)
 
 
-async def _extract_image_and_hint(request: Request) -> tuple[bytes, Optional[str]]:
-    """从请求中解析图片二进制数据及可选的补充提示词（支持 multipart 与 json 两种格式）"""
+async def _extract_image_and_hint(
+    request: Request,
+) -> tuple[bytes, Optional[str], bool]:
+    """从请求中解析图片二进制数据、可选的补充提示词与深度思考开关（支持 multipart 与 json 两种格式）"""
     content_type = request.headers.get("content-type", "")
     image_bytes = b""
     user_hint: Optional[str] = None
+    enable_thinking = False
 
     if "multipart/form-data" in content_type:
         form = await request.form()
@@ -652,6 +655,11 @@ async def _extract_image_and_hint(request: Request) -> tuple[bytes, Optional[str
         raw_hint = form.get("hint") or form.get("keywords")
         if raw_hint and isinstance(raw_hint, str):
             user_hint = raw_hint.strip()
+        raw_thinking = form.get("enable_thinking")
+        if isinstance(raw_thinking, str):
+            enable_thinking = raw_thinking.strip().lower() in ("true", "1", "yes", "on")
+        elif isinstance(raw_thinking, bool):
+            enable_thinking = raw_thinking
 
     elif "application/json" in content_type:
         try:
@@ -670,6 +678,7 @@ async def _extract_image_and_hint(request: Request) -> tuple[bytes, Optional[str
         raw_hint = body.get("hint") or body.get("keywords")
         if raw_hint and isinstance(raw_hint, str):
             user_hint = raw_hint.strip()
+        enable_thinking = body.get("enable_thinking") is True
 
     else:
         # 兼容未显式设置 Content-Type 的表单提交
@@ -693,7 +702,7 @@ async def _extract_image_and_hint(request: Request) -> tuple[bytes, Optional[str
     if not image_bytes:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="商品图片数据不能为空")
 
-    return image_bytes, user_hint
+    return image_bytes, user_hint, enable_thinking
 
 
 @router.post("/generate-listing", response_model=GenerateListingResponse)
@@ -713,11 +722,16 @@ async def generate_listing_endpoint(
     - 503: 未配置或未启用任何 AI 服务商
     - 502: 所有服务商均调用失败，返回每条服务商的错误详情（不含 Key）
     """
-    image_bytes, user_hint = await _extract_image_and_hint(request)
+    image_bytes, user_hint, enable_thinking = await _extract_image_and_hint(request)
 
     service = AiProviderFailoverService(session=session)
     try:
-        result = await service.generate_listing(image_bytes=image_bytes, hint=user_hint, owner_id=current_user.id)
+        result = await service.generate_listing(
+            image_bytes=image_bytes,
+            hint=user_hint,
+            owner_id=current_user.id,
+            enable_thinking=enable_thinking,
+        )
         return result
     except NoProviderConfiguredError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
@@ -745,11 +759,16 @@ async def identify_item_endpoint(
     - 503: 未配置或未启用任何 AI 服务商
     - 502: 所有服务商均调用失败，返回每条服务商的错误详情（不含 Key）
     """
-    image_bytes, user_hint = await _extract_image_and_hint(request)
+    image_bytes, user_hint, enable_thinking = await _extract_image_and_hint(request)
 
     service = AiProviderFailoverService(session=session)
     try:
-        result = await service.identify_item(image_bytes=image_bytes, hint=user_hint, owner_id=current_user.id)
+        result = await service.identify_item(
+            image_bytes=image_bytes,
+            hint=user_hint,
+            owner_id=current_user.id,
+            enable_thinking=enable_thinking,
+        )
         return result
     except NoProviderConfiguredError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
@@ -783,6 +802,7 @@ async def pick_competitor_endpoint(
     if not isinstance(body, dict):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="无效的 JSON 请求体")
 
+    enable_thinking = body.get("enable_thinking") is True
     b64_data = body.get("image_base64") or body.get("image") or ""
     if not b64_data or not isinstance(b64_data, str):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="缺少有效的 image_base64 或 image 字段")
@@ -815,7 +835,9 @@ async def pick_competitor_endpoint(
 
     service = AiProviderFailoverService(session=session)
     try:
-        result = await service.pick_competitor(image_bytes=image_bytes, competitors=competitors, owner_id=current_user.id)
+        result = await service.pick_competitor(image_bytes=image_bytes, competitors=competitors, owner_id=current_user.id,
+            enable_thinking=enable_thinking,
+        )
         index = int(result["competitor_index"])
         picked = competitors[index]
         return {
@@ -869,6 +891,7 @@ async def chat_endpoint(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="无效的 JSON 请求体")
 
     raw_messages = body.get("messages")
+    enable_thinking = body.get("enable_thinking") is True
     try:
         normalized_messages = _normalize_chat_messages(raw_messages)
     except ValueError as exc:
@@ -876,7 +899,11 @@ async def chat_endpoint(
 
     service = AiProviderFailoverService(session=session)
     try:
-        result = await service.chat(messages=normalized_messages, owner_id=current_user.id)
+        result = await service.chat(
+            messages=normalized_messages,
+            owner_id=current_user.id,
+            enable_thinking=enable_thinking,
+        )
         return result
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
@@ -887,6 +914,55 @@ async def chat_endpoint(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail={"message": str(exc), "errors": exc.errors},
         )
+
+
+@router.post("/identify/stream")
+async def identify_stream_endpoint(
+    request: Request,
+    current_user: User = Depends(get_current_admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> StreamingResponse:
+    """识物流式接口（走 SSE，容灾调度）
+
+    入参支持两种方式（二选一）：
+    1. multipart/form-data：通过 file 或 image 字段上传图片二进制文件；可选 hint 或 keywords 字段；可选 enable_thinking 字段。
+    2. application/json：通过 image_base64 或 image 传入 base64 编码的图片；可选 hint 或 keywords 字段；可选 enable_thinking 字段（默认 False）。
+
+    返回值：
+    - 200: text/event-stream 流式响应（SSE 事件：thinking 思考、delta 增量、done 结束、error 异常）
+      SSE 事件说明：
+      - thinking: 思考过程增量（转发服务商 delta.reasoning_content），格式：`event: thinking\ndata: {"thinking": "<原文>"}\n\n`
+      - delta: 识别原文增量，格式：`data: {"delta": "<内容>"}\n\n`
+      - done: 成功完成，格式：`event: done\ndata: {"event": "done", "provider_used": "<服务商名称>", "name": "...", "category": "...", "description": "...", "search_keyword": "..."}\n\n`
+      - error: 异常错误，格式：`event: error\ndata: {"event": "error", "error": "<错误描述>"}\n\n`
+    - 400: 入参不合法或格式错误
+    - 503: 未配置或未启用任何 AI 服务商（直接返回 503 JSON，不建流）
+    """
+    image_bytes, user_hint, enable_thinking = await _extract_image_and_hint(request)
+
+    service = AiProviderFailoverService(session=session)
+    providers = await service.get_enabled_providers()
+    if not providers:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="未配置 AI 服务商，请先通过后端接口添加服务商",
+        )
+
+    return StreamingResponse(
+        service.identify_item_stream(
+            image_bytes=image_bytes,
+            hint=user_hint,
+            enable_thinking=enable_thinking,
+            owner_id=current_user.id,
+            providers=providers,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/chat/stream")
@@ -927,6 +1003,7 @@ async def chat_stream_endpoint(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="无效的 JSON 请求体")
 
     raw_messages = body.get("messages")
+    enable_thinking = body.get("enable_thinking") is True
     try:
         normalized_messages = _normalize_chat_messages(raw_messages)
     except ValueError as exc:
@@ -941,7 +1018,11 @@ async def chat_stream_endpoint(
         )
 
     return StreamingResponse(
-        service.chat_stream(messages=normalized_messages, providers=providers),
+        service.chat_stream(
+            messages=normalized_messages,
+            providers=providers,
+            enable_thinking=enable_thinking,
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
