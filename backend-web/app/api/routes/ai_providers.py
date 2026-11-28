@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from datetime import datetime
 import base64
+import re
+import uuid
 from typing import Any, List, Optional
 
 import httpx
@@ -39,6 +41,7 @@ from app.services.ai_provider_failover_service import (
     NoProviderConfiguredError,
     _normalize_chat_messages,
 )
+from common.db.redis_client import get_redis_client
 from common.models.ai_provider_config import AiProviderConfig
 from common.models.system_setting import SystemSetting
 from common.models.user import User
@@ -152,6 +155,19 @@ class IdentifyItemResponse(BaseModel):
     description: str = Field(..., description="物品详细介绍")
     search_keyword: str = Field("", description="搜同款用的简短核心商品词")
     provider_used: str = Field(..., description="本次成功调用的服务商名称")
+
+
+class IdentifyImageUploadResponse(BaseModel):
+    """识物图片预上传响应：图片已暂存后端，识别时只传 image_id 即可"""
+
+    image_id: str = Field(..., description="临时图片标识（识别接口入参 image_id）")
+
+
+# 识物预上传图片的临时存储：Redis key 前缀 + 平台用户 ID + image_id，
+# 10 分钟过期自动清理；image_id 为 uuid4 hex（32 位小写十六进制）。
+IDENTIFY_IMAGE_KEY_PREFIX = "identify_image:"
+IDENTIFY_IMAGE_TTL_SECONDS = 600
+IDENTIFY_IMAGE_MAX_BYTES = 8 * 1024 * 1024
 
 
 class PickCompetitorResponse(BaseModel):
@@ -633,10 +649,47 @@ async def reset_ai_prompts(
     return await _load_prompt_settings(session)
 
 
+async def _load_temp_identify_image(image_id: str, user_id: int) -> bytes:
+    """从 Redis 临时存储里取预上传的识物图片（按平台用户隔离）。
+
+    image_id 必须是 uuid4 hex（32 位小写十六进制），key 里拼 user_id，
+    猜到别人的 image_id 也取不到图。取不到（过期或不存在）报 400，
+    App 端会降级到识别请求里带 base64。
+    """
+    if not re.fullmatch(r"[0-9a-f]{32}", image_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="无效的 image_id",
+        )
+    key = f"{IDENTIFY_IMAGE_KEY_PREFIX}{user_id}:{image_id}"
+    try:
+        redis = await get_redis_client()
+        data = await redis.get(key)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="图片暂存服务不可用，请重新选择图片后识别",
+        )
+    if not data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="图片已过期，请重新选择图片后识别",
+        )
+    if isinstance(data, str):
+        data = data.encode()
+    return data
+
+
 async def _extract_image_and_hint(
     request: Request,
+    current_user: Optional[User] = None,
 ) -> tuple[bytes, Optional[str], bool]:
-    """从请求中解析图片二进制数据、可选的补充提示词与深度思考开关（支持 multipart 与 json 两种格式）"""
+    """从请求中解析图片二进制数据、可选的补充提示词与深度思考开关（支持 multipart 与 json 两种格式）
+
+    JSON 入参还支持 image_id：选图时预上传拿到的临时图片标识（见 /identify/upload）。
+    只有传了 current_user 的调用方（识物流式接口）才认 image_id，其它接口
+    （非流式 identify、generate-listing）仍只认图片本身，入参不变。
+    """
     content_type = request.headers.get("content-type", "")
     image_bytes = b""
     user_hint: Optional[str] = None
@@ -666,15 +719,26 @@ async def _extract_image_and_hint(
             body = await request.json()
         except Exception:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="无效的 JSON 请求体")
-        b64_data = body.get("image_base64") or body.get("image") or ""
-        if not b64_data or not isinstance(b64_data, str):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="缺少有效的 image_base64 或 image 字段")
-        if "," in b64_data:
-            b64_data = b64_data.split(",", 1)[1]
-        try:
-            image_bytes = base64.b64decode(b64_data)
-        except Exception:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="图片 Base64 解码失败")
+        # 预上传的图片：用 image_id 从 Redis 临时存储里取（只认当前用户的图）。
+        raw_id = body.get("image_id")
+        if (
+            isinstance(raw_id, str)
+            and raw_id.strip()
+            and current_user is not None
+        ):
+            image_bytes = await _load_temp_identify_image(
+                raw_id.strip(), current_user.id
+            )
+        else:
+            b64_data = body.get("image_base64") or body.get("image") or ""
+            if not b64_data or not isinstance(b64_data, str):
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="缺少有效的 image_base64 或 image 字段")
+            if "," in b64_data:
+                b64_data = b64_data.split(",", 1)[1]
+            try:
+                image_bytes = base64.b64decode(b64_data)
+            except Exception:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="图片 Base64 解码失败")
         raw_hint = body.get("hint") or body.get("keywords")
         if raw_hint and isinstance(raw_hint, str):
             user_hint = raw_hint.strip()
@@ -916,6 +980,53 @@ async def chat_endpoint(
         )
 
 
+@router.post("/identify/upload", response_model=IdentifyImageUploadResponse)
+async def upload_identify_image_endpoint(
+    request: Request,
+    current_user: User = Depends(get_current_admin_user),
+) -> dict[str, Any]:
+    """预上传识物图片：App 选图后立即在后台调用，图片暂存 Redis（10 分钟过期），
+    返回 image_id；点识别时流式接口只传 image_id 就行，不用再传一遍大图。
+
+    入参 application/json：
+    - image_base64 或 image：图片 base64（必须，解码后不超过 8MB）
+
+    返回值：
+    - 200: {image_id}
+    - 400: 入参缺失或格式错误；503: 暂存服务不可用
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="无效的 JSON 请求体")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="无效的 JSON 请求体")
+    b64_data = body.get("image_base64") or body.get("image") or ""
+    if not b64_data or not isinstance(b64_data, str):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="缺少有效的 image_base64 或 image 字段")
+    if "," in b64_data:
+        b64_data = b64_data.split(",", 1)[1]
+    try:
+        image_bytes = base64.b64decode(b64_data)
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="图片 Base64 解码失败")
+    if not image_bytes:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="商品图片数据不能为空")
+    if len(image_bytes) > IDENTIFY_IMAGE_MAX_BYTES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="图片过大（解码后超过 8MB）")
+    image_id = uuid.uuid4().hex
+    key = f"{IDENTIFY_IMAGE_KEY_PREFIX}{current_user.id}:{image_id}"
+    try:
+        redis = await get_redis_client()
+        await redis.setex(key, IDENTIFY_IMAGE_TTL_SECONDS, image_bytes)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="图片暂存失败，请重试或直接识别",
+        )
+    return {"image_id": image_id}
+
+
 @router.post("/identify/stream")
 async def identify_stream_endpoint(
     request: Request,
@@ -927,6 +1038,7 @@ async def identify_stream_endpoint(
     入参支持两种方式（二选一）：
     1. multipart/form-data：通过 file 或 image 字段上传图片二进制文件；可选 hint 或 keywords 字段；可选 enable_thinking 字段。
     2. application/json：通过 image_base64 或 image 传入 base64 编码的图片；可选 hint 或 keywords 字段；可选 enable_thinking 字段（默认 False）。
+    3. application/json：通过 image_id 传入预上传的图片标识（见 /identify/upload）；图片从 Redis 临时存储里取，不用再传一遍图。
 
     返回值：
     - 200: text/event-stream 流式响应（SSE 事件：thinking 思考、delta 增量、done 结束、error 异常）
@@ -938,7 +1050,10 @@ async def identify_stream_endpoint(
     - 400: 入参不合法或格式错误
     - 503: 未配置或未启用任何 AI 服务商（直接返回 503 JSON，不建流）
     """
-    image_bytes, user_hint, enable_thinking = await _extract_image_and_hint(request)
+    # 传 current_user：JSON 入参带 image_id 时从 Redis 临时存储里取图。
+    image_bytes, user_hint, enable_thinking = await _extract_image_and_hint(
+        request, current_user=current_user
+    )
 
     service = AiProviderFailoverService(session=session)
     providers = await service.get_enabled_providers()
