@@ -16,7 +16,7 @@ from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 from typing import Any, Dict, Optional, Set
 
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
@@ -447,6 +447,10 @@ class ItemService:
         total_saved_count = 0
         fetched_pages = 0
         matched_required_title_keyword = False
+        # 只有整轮翻页自然结束（末页为空或不足一页）才算完整同步；
+        # 达到 max_pages 上限或命中“整页已存在”提前停止时，拉到的列表不完整，
+        # 不能按它清理本地商品，否则会误删后面几页的在售商品。
+        fully_fetched = False
         try:
             page_number = 1
             while True:
@@ -467,6 +471,7 @@ class ItemService:
                 items = result.get("items") or []
                 if not items:
                     logger.info(f"账号[{account.account_id}]商品同步第 {page_number} 页无数据，结束获取")
+                    fully_fetched = True
                     break
 
                 valid_items, skipped_count = self._collect_valid_item_entries(items)
@@ -521,6 +526,7 @@ class ItemService:
 
                 if len(items) < page_size:
                     logger.info(f"账号[{account.account_id}]商品同步第 {page_number} 页数量少于页大小，结束获取")
+                    fully_fetched = True
                     break
 
                 page_number += 1
@@ -539,6 +545,13 @@ class ItemService:
         )
         await self._backfill_missing_item_details(account, sync_item_ids)
 
+        # 完整同步成功后，清理本地残留的已下架商品：用户在闲鱼 App 下架后，
+        # 在售列表里已没有它，但本地 xy_catalog_items 之前只做 upsert 从不删除，
+        # 所以下架的商品会一直残留在商品管理列表里。
+        removed_count = 0
+        if fully_fetched:
+            removed_count = await self._prune_delisted_items(account, sync_item_ids)
+
         return {
             "success": True,
             "message": f"获取到 {len(fetched_items)} 个商品",
@@ -547,7 +560,49 @@ class ItemService:
             "total_pages": fetched_pages,
             "page_size": page_size,
             "saved_count": total_saved_count,
+            "removed_count": removed_count,
         }
+
+    async def _prune_delisted_items(
+        self,
+        account: XYAccount,
+        sync_item_ids: list[str],
+    ) -> int:
+        """删除本地目录里已不在售的商品（用户在闲鱼下架后，同步时清掉残留）。
+
+        只在一次完整同步成功后调用：sync_item_ids 是本次从闲鱼拉到的全部在售
+        商品 id；本地同账号下不在该列表里的记录，说明已在闲鱼下架，直接删除。
+        xy_catalog_items 没有 status 列，硬删除是最直接的做法；
+        发布流程不直接写这张表（只靠同步入库），所以不会误删刚发布的商品。
+        返回删除的件数，失败返回 0（不影响同步结果）。
+        """
+        try:
+            if sync_item_ids:
+                stmt = delete(XYCatalogItem).where(
+                    XYCatalogItem.owner_id == account.owner_id,
+                    XYCatalogItem.account_pk == account.id,
+                    XYCatalogItem.item_id.not_in(sync_item_ids),
+                )
+            else:
+                # 账号在闲鱼上已无在售商品，本地该账号的记录全清掉。
+                stmt = delete(XYCatalogItem).where(
+                    XYCatalogItem.owner_id == account.owner_id,
+                    XYCatalogItem.account_pk == account.id,
+                )
+            result = await self.session.execute(stmt)
+            await self.session.commit()
+            removed = result.rowcount or 0
+            if removed:
+                logger.info(
+                    f"账号[{account.account_id}]商品同步清理已下架商品 {removed} 件"
+                )
+            return removed
+        except Exception as exc:
+            await self.session.rollback()
+            logger.warning(
+                f"账号[{account.account_id}]清理已下架商品失败（不影响同步结果）: {exc}"
+            )
+            return 0
 
     async def fetch_all_items_from_accounts(
         self,
