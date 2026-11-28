@@ -998,7 +998,7 @@ async def upload_product_images(
     files: List[UploadFile] = File(...),
     current_user: User = Depends(get_current_active_user),
 ) -> Dict[str, Any]:
-    """上传商品图片（支持多张，最多9张，每张最大5MB）
+    """上传商品图片（支持多张，最多9张，不限制单张大小）
 
     返回本地文件路径列表，这些路径将直接传给 Playwright 的 set_input_files。
     """
@@ -1015,6 +1015,8 @@ async def upload_product_images(
             filepath, filename, _ = await save_uploaded_image(
                 file,
                 upload_dir,
+                # 不限制单张大小：大图由 App 端压缩后上传，后端只校验图片类型。
+                validate_size=False,
             )
         except ImageUploadError as exc:
             # 在消息里带上具体哪张图片出错，方便前端展示
